@@ -96,14 +96,19 @@ public:
         proxy = std::make_unique<CasProxyClient>(parsed->first, parsed->second);
     }
 
-    int32_t reconnect()
+    void reconnect()
     {
         if (!hcard) {
             connect();
-            return SCARD_S_SUCCESS;
+            return;
         }
-        return scard_reconnect(hcard, SCARD_SHARE_SHARED, SCARD_PROTOCOL_T1,
-                               SCARD_RESET_CARD, &active_protocol);
+        // A reset notification invalidates this handle, not the shared card.
+        // Acknowledging it must not reset the card again and disrupt other clients.
+        const LONG result = scard_reconnect(hcard, SCARD_SHARE_SHARED, SCARD_PROTOCOL_T1,
+                                             SCARD_LEAVE_CARD, &active_protocol);
+        if (result != SCARD_S_SUCCESS) {
+            throw std::runtime_error("SCardReconnect failed: " + std::to_string(result));
+        }
     }
 
     std::vector<uint8_t> transmit(const std::vector<uint8_t>& message, int32_t *status)
@@ -117,7 +122,7 @@ public:
                                        nullptr, recv.data(), &recv_length);
         for (int retry = 0; result != SCARD_S_SUCCESS && retry < 5; ++retry) {
             if (result == SCARD_W_RESET_CARD || result == SCARD_E_NOT_TRANSACTED) {
-                *status = SCARD_W_RESET_CARD;
+                *status = result;
                 return {};
             }
             recv_length = 256;
@@ -137,7 +142,11 @@ public:
     void begin()
     {
         connect();
-        const LONG result = scard_begin_transaction(hcard);
+        LONG result = scard_begin_transaction(hcard);
+        for (int retry = 0; result == SCARD_W_RESET_CARD && retry < 5; ++retry) {
+            reconnect();
+            result = scard_begin_transaction(hcard);
+        }
         if (result != SCARD_S_SUCCESS) {
             throw std::runtime_error("SCardBeginTransaction failed: " + std::to_string(result));
         }
