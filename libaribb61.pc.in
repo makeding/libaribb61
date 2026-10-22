@@ -1,0 +1,9 @@
+prefix=${pcfiledir}/../..
+exec_prefix=${prefix}
+libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+Name: libaribb61
+Description: Streaming ACAS MMT/TLV descrambler
+Version: @PROJECT_VERSION@
+Libs: -L${libdir} -laribb61
+Cflags: -I${includedir}
