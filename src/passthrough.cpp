@@ -254,6 +254,7 @@ void process_signaling_payload(uint32_t stream_id, uint32_t sequence,
     const uint8_t fragmentation = (payload[0] & 0xc0) >> 6;
     const bool length_extension = (payload[0] & 0x02) != 0;
     const bool aggregation = (payload[0] & 0x01) != 0;
+    if (fragmentation == 0) fragments.erase(stream_id);
     const uint8_t *message_payload = payload + 2;
     size_t message_size = size - 2;
 

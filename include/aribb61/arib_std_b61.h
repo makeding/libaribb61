@@ -14,6 +14,14 @@ typedef struct {
 enum { ARIB_STD_B61_OK = 0, ARIB_STD_B61_WARN_UNDECRYPTED = 1,
        ARIB_STD_B61_ERROR_INVALID_PARAM = -1, ARIB_STD_B61_ERROR_PROCESS = -2,
        ARIB_STD_B61_ERROR_NO_MEMORY = -3, ARIB_STD_B61_ERROR_STATE = -4 };
+/* Instances must be externally serialized. No card I/O occurs until signalling.
+ * put copies the input. A positive status accepts it but reports scrambled output.
+ * get drains output; its borrowed pointer survives only until the next mutating
+ * call. Empty output is not EOF. flush emits incomplete trailing bytes unchanged.
+ * reset discards stream state and keys but keeps options. After processing errors,
+ * reset before reuse. Options are set before the first nonempty put or after reset.
+ * See docs/API.md for scope limitations (single ECM context, AES compressed IP).
+ */
 ARIB_STD_B61 *create_arib_std_b61(void);
 void arib_std_b61_release(ARIB_STD_B61 *ctx);
 int arib_std_b61_put(ARIB_STD_B61 *ctx, const ARIB_STD_B61_BUFFER *buf);

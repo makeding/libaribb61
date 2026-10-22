@@ -402,6 +402,23 @@ void test_signaling_boundaries()
     require(card->ecm_calls == 2, "32-bit message length rejected");
 }
 
+void test_emm_option()
+{
+    for (bool enabled : {false, true}) {
+        auto fake = std::make_unique<FakeCard>();
+        auto *card = fake.get();
+        auto section = make_section(0x84, make_emm_payload(card->identity.module_id, {0x11, 0x22}));
+        std::vector<uint8_t> message{0x80, 0x00, 0, 0, 0};
+        put_be16(message.data() + 3, section.size());
+        message.insert(message.end(), section.begin(), section.end());
+        std::unique_ptr<ARIB_STD_B61, decltype(&arib_std_b61_release)> ctx(
+            aribb61_create_with_card(std::move(fake)), arib_std_b61_release);
+        if (enabled) require(arib_std_b61_set_emm_proc(ctx.get(), 1) == 0, "EMM option failed");
+        feed(ctx.get(), signaling_packet(message, 0, 0));
+        require(card->emm_calls == (enabled ? 1 : 0), "EMM option was ignored");
+    }
+}
+
 void test_invalid_auth_length_is_unchanged()
 {
     std::vector<uint8_t> packet(34, 0);
@@ -425,6 +442,7 @@ void test_invalid_auth_length_is_unchanged()
 
 int main()
 {
+    test_emm_option();
     test_signaling_boundaries();
     test_invalid_auth_length_is_unchanged();
     test_ecm_metadata_and_emm_selection();
