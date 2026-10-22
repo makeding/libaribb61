@@ -1,3 +1,5 @@
+#include <sstream>
+#include <iostream>
 #include "aribb61/arib_std_b61.h"
 
 #include <algorithm>
@@ -114,6 +116,8 @@ public:
     bool process_ecm(const std::vector<uint8_t>& ecm, acas_ecm_result& result) override
     {
         ++ecm_calls;
+        if (unavailable) { result.error = "test reader unavailable"; return false; }
+        result.response_valid = true;
         result.return_code = fail_next_ecm ? 0xa103 : 0x0800;
         result.broadcaster_id = 0x42;
         if (fail_next_ecm) {
@@ -141,6 +145,7 @@ public:
     int ecm_calls = 0;
     int emm_calls = 0;
     bool fail_next_ecm = false;
+    bool unavailable = false;
 };
 
 void test_ecm_metadata_and_emm_selection()
@@ -440,8 +445,44 @@ void test_invalid_auth_length_is_unchanged()
 
 } // namespace
 
+void test_diagnostics_and_recovery()
+{
+    auto owned = std::make_unique<FakeCard>();
+    auto *fake = owned.get();
+    AcasState state(std::move(owned));
+    std::ostringstream log;
+    auto *previous = std::cerr.rdbuf(log.rdbuf());
+    acas_ecm_metadata metadata{};
+    std::vector<uint8_t> ecm(32, 0);
+    require(state.on_ecm(ecm, metadata), "diagnostics and recovery");
+    require(log.str().empty(), "diagnostics and recovery");
+    ecm[3] = 1;
+    fake->unavailable = true;
+    require(!state.on_ecm(ecm, metadata), "diagnostics and recovery");
+    const auto first = log.str();
+    require(first.find("unavailable") != std::string::npos, "diagnostics and recovery");
+    require(first.find("rejected") == std::string::npos, "diagnostics and recovery");
+    require(first.find("return=") == std::string::npos, "diagnostics and recovery");
+    require(!state.on_ecm(ecm, metadata), "diagnostics and recovery");
+    require(log.str() == first, "diagnostics and recovery");
+    require(fake->ecm_calls == 3, "diagnostics and recovery");
+    fake->unavailable = false;
+    require(state.on_ecm(ecm, metadata), "diagnostics and recovery");
+    require(log.str().find("recovered") != std::string::npos, "diagnostics and recovery");
+    state.set_verbose(true);
+    ecm[3] = 2;
+    require(state.on_ecm(ecm, metadata), "diagnostics and recovery");
+    require(log.str().find("updated") != std::string::npos, "diagnostics and recovery");
+    fake->fail_next_ecm = true;
+    ecm[3] = 3;
+    require(!state.on_ecm(ecm, metadata), "diagnostics and recovery");
+    require(log.str().find("rejected") != std::string::npos, "diagnostics and recovery");
+    std::cerr.rdbuf(previous);
+}
+
 int main()
 {
+    test_diagnostics_and_recovery();
     test_emm_option();
     test_signaling_boundaries();
     test_invalid_auth_length_is_unchanged();

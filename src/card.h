@@ -15,6 +15,8 @@ struct acas_card_identity {
 struct acas_ecm_result {
     std::array<uint8_t, 16> odd_key{};
     std::array<uint8_t, 16> even_key{};
+    bool response_valid = false;
+    std::string error;
     uint16_t return_code = 0;
     uint8_t broadcaster_id = 0;
 };
@@ -22,6 +24,7 @@ struct acas_ecm_result {
 class AcasCardClient {
 public:
     virtual ~AcasCardClient() = default;
+    virtual std::string last_error() const { return {}; }
     virtual void set_proxy(const std::string& address) = 0;
     virtual bool get_identity(acas_card_identity& identity) = 0;
     virtual bool process_ecm(const std::vector<uint8_t>& ecm, acas_ecm_result& result) = 0;

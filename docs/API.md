@@ -19,3 +19,11 @@ of successful descrambling. No fake service enumeration is provided.
 Acceptance: C ABI consumer, arbitrary fragmentation, borrowed output lifecycle,
 small Rust reads, flush, reset, strip, EMM gating, rejection/key rotation tests.
 Real card/proxy and broadcast sample verification remain separate acceptance.
+
+Diagnostics: verbose defaults to off; arib_std_b61_set_verbose enables ECM/EMM
+update details before input (and is retained by reset). Failures are logged on
+change and recovery is logged once; repeated identical ECM failures are suppressed
+without suppressing retries. Transport/reader failures are not card rejections;
+card return codes are printed only when a valid ECM response was received.
+Positive undecrypted statuses and packet statistics remain unchanged; consumers
+should coalesce their own repeated warning messages. No keys are logged.

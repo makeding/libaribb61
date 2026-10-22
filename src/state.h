@@ -15,6 +15,7 @@ class AcasState {
 public:
     explicit AcasState(std::unique_ptr<AcasCardClient> card = make_acas_card_client());
 
+    void set_verbose(bool enabled) { verbose = enabled; }
     void set_proxy(const std::string& address);
     bool on_ecm(const std::vector<uint8_t>& ecm, const acas_ecm_metadata& metadata);
     void on_emm_section(const uint8_t *data, size_t size);
@@ -38,6 +39,9 @@ private:
     std::array<uint8_t, 16> odd_key{};
     std::array<uint8_t, 16> even_key{};
     bool has_key = false;
+    bool verbose = false;
+    std::string last_failure;
+    bool emm_identity_failed = false;
 };
 
 #endif

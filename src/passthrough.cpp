@@ -315,6 +315,7 @@ class Passthrough {
 public:
     explicit Passthrough(std::unique_ptr<AcasCardClient> card = make_acas_card_client())
         : acas(std::move(card)) {}
+    void set_verbose(bool enabled) { acas.set_verbose(enabled); }
     ARIB_STD_B61_STATISTICS stats{};
     bool emm_enabled = false;
     void set_proxy(const std::string& address)
@@ -498,7 +499,7 @@ struct ARIB_STD_B61 {
     std::unique_ptr<Passthrough> impl;
     std::vector<uint8_t> output, borrowed;
     std::string proxy;
-    bool strip = false, emm = false, started = false, failed = false;
+    bool verbose = false, strip = false, emm = false, started = false, failed = false;
 };
 
 namespace {
@@ -554,10 +555,17 @@ extern "C" int arib_std_b61_reset(ARIB_STD_B61 *ctx) {
     return guarded(ctx, [&] {
         auto fresh = std::make_unique<Passthrough>();
         if (!ctx->proxy.empty()) fresh->set_proxy(ctx->proxy);
+        fresh->set_verbose(ctx->verbose);
         fresh->set_strip(ctx->strip); fresh->emm_enabled = ctx->emm;
         ctx->impl = std::move(fresh);
         ctx->output.clear(); ctx->borrowed.clear(); ctx->started = false;
         return 0;
+    });
+}
+extern "C" int arib_std_b61_set_verbose(ARIB_STD_B61 *ctx, int enabled) {
+    return guarded(ctx, [&] {
+        if (ctx->started) return -4;
+        ctx->verbose = enabled != 0; ctx->impl->set_verbose(ctx->verbose); return 0;
     });
 }
 extern "C" int arib_std_b61_set_strip(ARIB_STD_B61 *ctx, int enabled) {

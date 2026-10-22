@@ -3,6 +3,7 @@
 #include <iomanip>
 #include <iostream>
 #include <utility>
+#include <sstream>
 
 #include "crypto/aes.h"
 
@@ -52,7 +53,15 @@ bool AcasState::on_ecm(const std::vector<uint8_t>& ecm,
     has_key = false;
     acas_ecm_result result;
     if (!card->process_ecm(ecm, result)) {
-        log_ecm("rejected", metadata, result.return_code, result.broadcaster_id);
+        const std::string reason = !result.error.empty() ? result.error : card->last_error();
+        const std::string failure = result.response_valid
+            ? "card:" + std::to_string(result.return_code) + ":" + std::to_string(result.broadcaster_id)
+            : "reader/transport: " + (reason.empty() ? "card communication or response validation failed" : reason);
+        if (verbose || failure != last_failure) {
+            if (result.response_valid) log_ecm("rejected", metadata, result.return_code, result.broadcaster_id);
+            else std::cerr << "ACAS ECM unavailable: " << failure << std::endl;
+        }
+        last_failure = failure;
         return false;
     }
 
@@ -60,7 +69,9 @@ bool AcasState::on_ecm(const std::vector<uint8_t>& ecm,
     even_key = result.even_key;
     last_ecm = ecm;
     has_key = true;
-    log_ecm("updated", metadata, result.return_code, result.broadcaster_id);
+    if (!last_failure.empty()) std::cerr << "ACAS ECM processing recovered" << std::endl;
+    last_failure.clear();
+    if (verbose) log_ecm("updated", metadata, result.return_code, result.broadcaster_id);
     return true;
 }
 
@@ -68,10 +79,13 @@ void AcasState::on_emm_section(const uint8_t *data, size_t size)
 {
     acas_card_identity identity;
     if (!card->get_identity(identity)) {
-        std::cerr << "ACAS EMM ignored: cannot read CAS module identity" << std::endl;
+        if (verbose || !emm_identity_failed)
+            std::cerr << "ACAS EMM ignored: cannot read CAS module identity" << std::endl;
+        emm_identity_failed = true;
         return;
     }
 
+    emm_identity_failed = false;
     std::vector<uint8_t> emm;
     if (!acas_select_emm_payload(data, size, identity.module_id, emm) ||
         emm == last_emm) {
@@ -88,7 +102,7 @@ void AcasState::on_emm_section(const uint8_t *data, size_t size)
 
     last_emm = std::move(emm);
     last_ecm.clear();
-    std::cerr << "ACAS EMM updated work-key state: ca_system_id=0x"
+    if (verbose) std::cerr << "ACAS EMM updated work-key state: ca_system_id=0x"
               << std::hex << std::setw(4) << std::setfill('0')
               << identity.ca_system_id << std::setfill(' ') << std::dec
               << std::endl;

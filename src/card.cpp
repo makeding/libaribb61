@@ -73,6 +73,17 @@ public:
         }
     }
 
+    void invalidate() noexcept
+    {
+        const auto old_card = hcard;
+        const auto old_context = hcontext;
+        hcard = 0;
+        hcontext = 0;
+        reader_name.clear();
+        try { if (old_card) scard_disconnect(old_card, SCARD_LEAVE_CARD); } catch (...) {}
+        try { if (old_context) scard_release_context(old_context); } catch (...) {}
+    }
+
     void set_proxy(const std::string& address)
     {
         if (hcontext || hcard) {
@@ -264,13 +275,16 @@ private:
         DWORD size = 0;
         int32_t result = scard_list_readers(hcontext, nullptr, &size);
         if (result != SCARD_S_SUCCESS || size == 0) {
-            throw std::runtime_error("No smart card readers are available");
+            throw std::runtime_error("SCardListReaders (" + std::string(proxy ? "proxy" : "local") +
+                                     ") failed: status=" + std::to_string(static_cast<uint32_t>(result)) +
+                                     " size=" + std::to_string(size));
         }
 
         std::vector<char> readers(size);
         result = scard_list_readers(hcontext, readers.data(), &size);
         if (result != SCARD_S_SUCCESS || readers.empty() || readers[0] == '\0') {
-            throw std::runtime_error("Failed to list smart card readers");
+            throw std::runtime_error("SCardListReaders data failed: status=" +
+                                     std::to_string(static_cast<uint32_t>(result)));
         }
 
         if (proxy) {
@@ -334,6 +348,7 @@ private:
 
 class PcscAcasCardClient final : public AcasCardClient {
 public:
+    std::string last_error() const override { return error; }
     void set_proxy(const std::string& address) override
     {
         card.set_proxy(address);
@@ -369,7 +384,9 @@ public:
                 output = identity;
                 return true;
             } catch (const std::runtime_error& e) {
-                std::cerr << e.what() << std::endl;
+                error = e.what();
+                identity_valid = false;
+                card.invalidate();
                 return false;
             }
         }
@@ -378,6 +395,8 @@ public:
 
     bool process_ecm(const std::vector<uint8_t>& ecm, acas_ecm_result& output) override
     {
+        output = {};
+        error.clear();
         acas_card_identity unused;
         if (ecm.size() < 0x1b || !get_identity(unused)) {
             return false;
@@ -399,11 +418,15 @@ public:
                     continue;
                 }
                 if (status != SCARD_S_SUCCESS) {
+                    error = "SCardTransmit failed: status=" + std::to_string(static_cast<uint32_t>(status));
+                    identity_valid = false;
+                    card.invalidate();
                     return false;
                 }
 
                 acas_ecm_card_response parsed;
                 const bool viewable = acas_parse_ecm_card_response(response, parsed);
+                output.response_valid = response.size() >= 41 && has_success_status(response);
                 output.return_code = parsed.return_code;
                 output.broadcaster_id = parsed.broadcaster_id;
                 if (!viewable) {
@@ -421,7 +444,9 @@ public:
                 std::copy(keys.begin() + 0x10, keys.end(), output.even_key.begin());
                 return true;
             } catch (const std::runtime_error& e) {
-                std::cerr << e.what() << std::endl;
+                error = e.what();
+                identity_valid = false;
+                card.invalidate();
                 return false;
             }
         }
@@ -447,7 +472,9 @@ public:
                 return_code = be16(response.data() + 4);
                 return return_code == 0x2100;
             } catch (const std::runtime_error& e) {
-                std::cerr << e.what() << std::endl;
+                error = e.what();
+                identity_valid = false;
+                card.invalidate();
                 return false;
             }
         }
@@ -495,6 +522,7 @@ private:
     }
 
     PcscCard card;
+    std::string error;
     acas_card_identity identity;
     bool identity_valid = false;
 };

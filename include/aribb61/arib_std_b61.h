@@ -28,6 +28,7 @@ int arib_std_b61_put(ARIB_STD_B61 *ctx, const ARIB_STD_B61_BUFFER *buf);
 int arib_std_b61_get(ARIB_STD_B61 *ctx, ARIB_STD_B61_BUFFER *buf);
 int arib_std_b61_flush(ARIB_STD_B61 *ctx);
 int arib_std_b61_reset(ARIB_STD_B61 *ctx);
+int arib_std_b61_set_verbose(ARIB_STD_B61 *ctx, int enabled);
 int arib_std_b61_set_strip(ARIB_STD_B61 *ctx, int enabled);
 int arib_std_b61_set_emm_proc(ARIB_STD_B61 *ctx, int enabled);
 int arib_std_b61_set_cas_proxy(ARIB_STD_B61 *ctx, const char *address);
