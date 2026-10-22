@@ -21,3 +21,9 @@ upstream dantto4k revision 141fd49cf674c9c9e3f3c770a20b3291ff292969.
 Preserved recdvb GPLv3 COPYING and upstream Apache-2.0 LICENSE.dantto4k;
 this extraction does not relicense upstream material. Original source notices
 remain in the implementation, including bundled crypto code.
+
+### Static builds
+
+Use `-DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF` for embedding the library.
+The default remains shared. Static consumers also link the platform PC/SC,
+thread and C++ runtime libraries (plus Winsock on Windows).
