@@ -40,7 +40,7 @@ int main(void) {
     CHECK(arib_std_b61_reset(ctx) == 0);
     CHECK(arib_std_b61_get_statistics(ctx, &stats) == 0 && stats.total_packet_count == 0);
     /* Encrypted MMTP without ECM must remain byte-identical and observable. */
-    uint8_t scrambled[37] = {0x7f, 0x03, 0, 33, 0, 0, 0};
+    uint8_t scrambled[37] = {0x7f, 0x03, 0, 33, 0, 0, 0x61};
     scrambled[7] = 0x02; /* MMTP extension present */
     scrambled[22] = 5;   /* extension length */
     scrambled[23] = 0x80; scrambled[24] = 1; /* last multitype: B61 */

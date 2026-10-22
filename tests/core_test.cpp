@@ -298,7 +298,7 @@ void test_clear_authenticated_passthrough()
 
     std::vector<uint8_t> packet = {
         kTlvSync, kTlvPacketTypeCompressedIp, 0x00, 0x00,
-        0x00, 0x00, 0x00,
+        0x00, 0x00, 0x61,
     };
     packet.insert(packet.end(), mmtp.begin(), mmtp.end());
     put_be16(packet.data() + 2, static_cast<uint16_t>(packet.size() - 4));

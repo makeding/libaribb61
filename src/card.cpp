@@ -126,7 +126,10 @@ public:
     void begin()
     {
         connect();
-        scard_begin_transaction(hcard);
+        const LONG result = scard_begin_transaction(hcard);
+        if (result != SCARD_S_SUCCESS) {
+            throw std::runtime_error("SCardBeginTransaction failed: " + std::to_string(result));
+        }
     }
 
     void end()

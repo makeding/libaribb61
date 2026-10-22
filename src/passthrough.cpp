@@ -196,7 +196,9 @@ bool parse_mmtp(uint8_t *data, size_t size, MmtpInfo& out)
 
     out.payload_offset = pos;
     out.payload_size = size - pos;
-    if (out.decrypt_size == 0 || out.decrypt_size > out.payload_size) {
+    if (out.has_message_authentication) {
+        if (out.decrypt_size > out.payload_size) return false;
+    } else {
         out.decrypt_size = out.payload_size;
     }
     return true;
@@ -213,8 +215,11 @@ void process_signaling_message(const uint8_t *data, size_t size, AcasState& acas
         return;
     }
 
-    const uint8_t *section = data + 5;
-    const size_t section_size = size - 5;
+    const size_t header_size = message_id == 0x8003 ? 7 : 5;
+    if (size < header_size) return;
+    const size_t section_size = header_size == 7 ? be32(data + 3) : be16(data + 3);
+    if (section_size > size - header_size) return;
+    const uint8_t *section = data + header_size;
     if (section_size == 0) {
         return;
     }
@@ -230,8 +235,17 @@ void process_signaling_message(const uint8_t *data, size_t size, AcasState& acas
     }
 }
 
-void process_signaling_payload(uint16_t packet_id, const uint8_t *payload, size_t size,
-                               std::map<uint16_t, std::vector<uint8_t>>& fragments,
+struct SignalingFragment {
+    uint32_t sequence;
+    std::vector<uint8_t> data;
+};
+// M2 sections are at most 4098 bytes; allow room for message headers and reject
+// unbounded hostile fragments. State is keyed by compressed-IP context and PID.
+constexpr size_t kMaxSignalingMessage = 8192;
+constexpr size_t kMaxFragmentStreams = 256;
+void process_signaling_payload(uint32_t stream_id, uint32_t sequence,
+                               const uint8_t *payload, size_t size,
+                               std::map<uint32_t, SignalingFragment>& fragments,
                                AcasState& acas, bool emm_enabled)
 {
     if (size < 2) {
@@ -245,17 +259,27 @@ void process_signaling_payload(uint16_t packet_id, const uint8_t *payload, size_
 
     auto handle_message = [&](const uint8_t *msg, size_t msg_size) {
         if (fragmentation == 0) {
+            fragments.erase(stream_id);
             process_signaling_message(msg, msg_size, acas, emm_enabled);
         } else if (fragmentation == 1) {
-            fragments[packet_id].assign(msg, msg + msg_size);
-        } else if (fragmentation == 2) {
-            auto& fragment = fragments[packet_id];
-            fragment.insert(fragment.end(), msg, msg + msg_size);
-        } else if (fragmentation == 3) {
-            auto& fragment = fragments[packet_id];
-            fragment.insert(fragment.end(), msg, msg + msg_size);
-            process_signaling_message(fragment.data(), fragment.size(), acas, emm_enabled);
-            fragments.erase(packet_id);
+            fragments.erase(stream_id);
+            if (msg_size > kMaxSignalingMessage || fragments.size() >= kMaxFragmentStreams) return;
+            fragments.emplace(stream_id, SignalingFragment{sequence, {msg, msg + msg_size}});
+        } else {
+            auto it = fragments.find(stream_id);
+            if (it == fragments.end()) return;
+            auto& fragment = it->second;
+            if (sequence != fragment.sequence + uint32_t{1} ||
+                msg_size > kMaxSignalingMessage - fragment.data.size()) {
+                fragments.erase(it);
+                return;
+            }
+            fragment.sequence = sequence;
+            fragment.data.insert(fragment.data.end(), msg, msg + msg_size);
+            if (fragmentation == 3) {
+                process_signaling_message(fragment.data.data(), fragment.data.size(), acas, emm_enabled);
+                fragments.erase(it);
+            }
         }
     };
 
@@ -265,6 +289,7 @@ void process_signaling_payload(uint16_t packet_id, const uint8_t *payload, size_
     }
 
     if (fragmentation != 0) {
+        fragments.erase(stream_id);
         return;
     }
     size_t pos = 0;
@@ -287,6 +312,8 @@ using acas_output_callback = int (*)(void*, const uint8_t*, size_t);
 
 class Passthrough {
 public:
+    explicit Passthrough(std::unique_ptr<AcasCardClient> card = make_acas_card_client())
+        : acas(std::move(card)) {}
     ARIB_STD_B61_STATISTICS stats{};
     bool emm_enabled = false;
     void set_proxy(const std::string& address)
@@ -385,6 +412,8 @@ private:
 
         size_t pos = 3;
         const uint8_t header_type = tlv_data[2];
+        if (header_type != 0x60 && header_type != 0x61) return;
+        const uint32_t context_id = be16(tlv_data) >> 4;
         if (header_type == 0x60) {
             pos += 42;
         }
@@ -401,7 +430,8 @@ private:
 
         uint8_t *payload = mmtp + info.payload_offset;
         if (info.payload_type == kMmtpPayloadControlMessage) {
-            process_signaling_payload(info.packet_id, payload, info.payload_size, fragments, acas, emm_enabled);
+            process_signaling_payload((context_id << 16) | info.packet_id, info.sequence,
+                                      payload, info.payload_size, fragments, acas, emm_enabled);
         }
 
         const bool encrypted = info.scramble_flag == kScrambleEven ||
@@ -453,14 +483,16 @@ private:
 
     AcasState acas;
     std::vector<uint8_t> buffer;
-    std::map<uint16_t, std::vector<uint8_t>> fragments;
+    std::map<uint32_t, SignalingFragment> fragments;
     bool strip_null_packets = false;
 };
 
 } // namespace
 
 struct ARIB_STD_B61 {
-    std::unique_ptr<Passthrough> impl = std::make_unique<Passthrough>();
+    explicit ARIB_STD_B61(std::unique_ptr<AcasCardClient> card = make_acas_card_client())
+        : impl(std::make_unique<Passthrough>(std::move(card))) {}
+    std::unique_ptr<Passthrough> impl;
     std::vector<uint8_t> output, borrowed;
     std::string proxy;
     bool strip = false, emm = false, started = false, failed = false;
@@ -547,4 +579,9 @@ extern "C" int arib_std_b61_set_cas_proxy(ARIB_STD_B61 *ctx, const char *address
 extern "C" int arib_std_b61_get_statistics(const ARIB_STD_B61 *ctx, ARIB_STD_B61_STATISTICS *stats) {
     if (!ctx || !stats) return ARIB_STD_B61_ERROR_INVALID_PARAM;
     *stats = ctx->impl->stats; return 0;
+}
+
+// Internal dependency injection for stream-boundary tests; not part of the C ABI.
+ARIB_STD_B61 *aribb61_create_with_card(std::unique_ptr<AcasCardClient> card) {
+    return new ARIB_STD_B61(std::move(card));
 }
