@@ -27,7 +27,7 @@ uint32_t section_crc32(const uint8_t *data, size_t size)
 
 bool section_bounds(const uint8_t *data, size_t size, uint8_t table_id, size_t& section_size)
 {
-    if (size < 12 || data[0] != table_id) {
+    if (size < 12 || data[0] != table_id || (data[5] & 1) == 0) {
         return false;
     }
     section_size = 3 + (be16(data + 1) & 0x0fff);

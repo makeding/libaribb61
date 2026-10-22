@@ -429,10 +429,7 @@ private:
         }
 
         uint8_t *payload = mmtp + info.payload_offset;
-        if (info.payload_type == kMmtpPayloadControlMessage) {
-            process_signaling_payload((context_id << 16) | info.packet_id, info.sequence,
-                                      payload, info.payload_size, fragments, acas, emm_enabled);
-        }
+
 
         const bool encrypted = info.scramble_flag == kScrambleEven ||
                                info.scramble_flag == kScrambleOdd;
@@ -447,6 +444,11 @@ private:
             if (info.scramble_control) {
                 *info.scramble_control &= static_cast<uint8_t>(~0x18);
             }
+        }
+
+        if (info.payload_type == kMmtpPayloadControlMessage) {
+            process_signaling_payload((context_id << 16) | info.packet_id, info.sequence,
+                                      payload, info.payload_size, fragments, acas, emm_enabled);
         }
 
         /*

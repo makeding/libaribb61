@@ -14,6 +14,8 @@
 #include "response.h"
 #include "state.h"
 
+ARIB_STD_B61 *aribb61_create_with_card(std::unique_ptr<AcasCardClient> card);
+
 namespace {
 
 constexpr uint8_t kScrambleEven = 0x02;
@@ -57,6 +59,7 @@ std::vector<uint8_t> make_section(uint8_t table_id, const std::vector<uint8_t>& 
 {
     std::vector<uint8_t> section(8, 0);
     section[0] = table_id;
+    section[5] = 1; // current_next_indicator: currently applicable section
     section.insert(section.end(), payload.begin(), payload.end());
     section.resize(section.size() + 4);
     const uint16_t section_length = static_cast<uint16_t>(section.size() - 3);
@@ -323,10 +326,107 @@ void test_clear_authenticated_passthrough()
     require(output == expected, "clear authenticated packet mismatch");
 }
 
+std::vector<uint8_t> signaling_packet(const std::vector<uint8_t>& message,
+                                     uint8_t fragmentation, uint32_t sequence,
+                                     uint16_t context = 0)
+{
+    std::vector<uint8_t> packet(21, 0);
+    packet[0] = 0x7f; packet[1] = 3;
+    put_be16(packet.data() + 4, context << 4);
+    packet[6] = 0x61;
+    packet[8] = 2; // signalling payload
+    packet[10] = 0x42;
+    put_be32(packet.data() + 15, sequence);
+    packet[19] = fragmentation << 6;
+    packet.insert(packet.end(), message.begin(), message.end());
+    put_be16(packet.data() + 2, packet.size() - 4);
+    return packet;
+}
+
+void feed(ARIB_STD_B61 *ctx, std::vector<uint8_t> packet)
+{
+    ARIB_STD_B61_BUFFER input{packet.data(), static_cast<uint32_t>(packet.size())};
+    require(arib_std_b61_put(ctx, &input) >= 0, "feed failed");
+    ARIB_STD_B61_BUFFER output{};
+    require(arib_std_b61_get(ctx, &output) == 0, "get failed");
+}
+
+void test_signaling_boundaries()
+{
+    auto fake = std::make_unique<FakeCard>();
+    auto *card = fake.get();
+    std::unique_ptr<ARIB_STD_B61, decltype(&arib_std_b61_release)> ctx(
+        aribb61_create_with_card(std::move(fake)), arib_std_b61_release);
+    std::vector<uint8_t> ecm(27, 0); ecm[3] = 0x12;
+    auto section = make_section(0x82, ecm);
+    std::vector<uint8_t> message{0x80, 0x00, 0, 0, 0};
+    put_be16(message.data() + 3, section.size());
+    message.insert(message.end(), section.begin(), section.end());
+    // Future (current_next=0) ECM must not overwrite the current key state.
+    auto future = section; future[5] = 0;
+    put_be32(future.data() + future.size() - 4, section_crc32(future.data(), future.size() - 4));
+    auto future_message = message;
+    std::copy(future.begin(), future.end(), future_message.begin() + 5);
+    feed(ctx.get(), signaling_packet(future_message, 0, 0));
+    require(card->ecm_calls == 0, "future ECM was applied early");
+    const auto half = message.size() / 2;
+    std::vector<uint8_t> first(message.begin(), message.begin() + half);
+    std::vector<uint8_t> last(message.begin() + half, message.end());
+    // Orphan tail must not be accepted even if it contains a whole valid ECM.
+    feed(ctx.get(), signaling_packet(message, 3, 1));
+    require(card->ecm_calls == 0, "orphan tail accepted");
+    feed(ctx.get(), signaling_packet(first, 1, 2));
+    feed(ctx.get(), signaling_packet(last, 3, 4));
+    require(card->ecm_calls == 0, "discontinuous fragments accepted");
+    // Same PID in distinct compressed-IP contexts must not join.
+    feed(ctx.get(), signaling_packet(first, 1, 5, 1));
+    feed(ctx.get(), signaling_packet(last, 3, 6, 2));
+    require(card->ecm_calls == 0, "fragments crossed IP contexts");
+    auto malformed = signaling_packet(message, 0, 7);
+    malformed[6] = 0x62;
+    feed(ctx.get(), malformed);
+    require(card->ecm_calls == 0, "unknown compressed header parsed as MMTP");
+    auto short_length = message; short_length[4] = 1;
+    feed(ctx.get(), signaling_packet(short_length, 0, 8));
+    require(card->ecm_calls == 0, "message length ignored");
+    feed(ctx.get(), signaling_packet(first, 1, UINT32_MAX));
+    feed(ctx.get(), signaling_packet(last, 3, 0));
+    require(card->ecm_calls == 1, "valid sequence wrap fragments rejected");
+
+    // 0x8003 has a 32-bit length, unlike 0x8000's 16-bit length.
+    ecm[3] = 0x13; section = make_section(0x82, ecm);
+    std::vector<uint8_t> long_message{0x80, 0x03, 0, 0, 0, 0, 0};
+    put_be32(long_message.data() + 3, section.size());
+    long_message.insert(long_message.end(), section.begin(), section.end());
+    feed(ctx.get(), signaling_packet(long_message, 0, 9));
+    require(card->ecm_calls == 2, "32-bit message length rejected");
+}
+
+void test_invalid_auth_length_is_unchanged()
+{
+    std::vector<uint8_t> packet(34, 0);
+    packet[0] = 0x7f; packet[1] = 3; packet[6] = 0x61;
+    put_be16(packet.data() + 2, packet.size() - 4);
+    packet[7] = 2;
+    put_be16(packet.data() + 21, 7);
+    put_be16(packet.data() + 23, 0x8001);
+    put_be16(packet.data() + 25, 3);
+    packet[27] = 2; // clear but authenticated
+    put_be16(packet.data() + 28, 100); // larger than actual payload
+    std::unique_ptr<ARIB_STD_B61, decltype(&arib_std_b61_release)> ctx(
+        create_arib_std_b61(), arib_std_b61_release);
+    ARIB_STD_B61_BUFFER input{packet.data(), static_cast<uint32_t>(packet.size())}, output{};
+    require(arib_std_b61_put(ctx.get(), &input) == 0, "malformed packet feed failed");
+    require(arib_std_b61_get(ctx.get(), &output) == 0 && output.size == packet.size() &&
+            std::equal(packet.begin(), packet.end(), output.data), "invalid auth length modified packet");
+}
+
 } // namespace
 
 int main()
 {
+    test_signaling_boundaries();
+    test_invalid_auth_length_is_unchanged();
     test_ecm_metadata_and_emm_selection();
     test_ecm_card_response_validation();
     test_clear_to_scrambled_key_transition();
