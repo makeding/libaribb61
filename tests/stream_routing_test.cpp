@@ -232,8 +232,10 @@ void test_missing_wrong_and_replaced_routes()
 
     install_mpts(ctx.get(), 1, 0x100, 2, { route_table(1, 0x101, 0x200, 0x300) });
     send_ecm(ctx.get(), 1, 0x300, 3, 1);
-    require(card->calls[1] == 1 && feed(ctx.get(), no_route).status == ARIB_STD_B61_WARN_UNDECRYPTED,
-            "missing CAT did not block decryption");
+    const auto without_cat = feed(ctx.get(), no_route);
+    require(card->calls[1] == 1 && without_cat.status == ARIB_STD_B61_OK &&
+            without_cat.output == expected_plain(1, 0x200, 1, plain),
+            "service-filtered input without CAT did not decrypt");
     install_cat(ctx.get(), 4);
     require(feed(ctx.get(), no_route).output == expected_plain(1, 0x200, 1, plain),
             "valid CAT did not enable decryption");

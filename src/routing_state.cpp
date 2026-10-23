@@ -21,7 +21,7 @@ bool RoutingState::update_cat(uint32_t source, const MhCatSnapshot& snapshot)
 
 bool RoutingState::supports_scrambling() const
 {
-    return cats.size() == 1 && cats.begin()->second.supported_scrambling;
+    return cats.empty() || (cats.size() == 1 && cats.begin()->second.supported_scrambling);
 }
 
 bool RoutingState::update_flow(uint16_t cid, const uint8_t *header)
