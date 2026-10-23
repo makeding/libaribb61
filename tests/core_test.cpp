@@ -458,7 +458,7 @@ void test_signaling_boundaries()
     auto conflict_middle = std::vector<uint8_t>(message.begin() + third, message.begin() + third * 2);
     auto conflicting_middle = std::vector<uint8_t>(conflicting_message.begin() + third,
                                                    conflicting_message.begin() + third * 2);
-    auto conflict_last = std::vector<uint8_t>(message.begin() + third * 2, message.end());
+    auto conflict_last = std::vector<uint8_t>(conflicting_message.begin() + third * 2, conflicting_message.end());
     auto conflicting_section = make_section(0x82, conflicting_ecm);
     require(section_crc32(conflicting_section.data(), conflicting_section.size()) == 0,
             "conflicting test ECM CRC invalid");
@@ -487,13 +487,13 @@ void test_signaling_boundaries()
     put_be32(long_message.data() + 3, section.size());
     long_message.insert(long_message.end(), section.begin(), section.end());
     feed(ctx.get(), signaling_packet(long_message, 0, 9));
-    require(card->ecm_calls == 1, "data transmission message supplied ECM keys");
+    require(card->ecm_calls == 3, "data transmission message supplied ECM keys");
     auto short_message = message; short_message[1] = 2;
     feed(ctx.get(), signaling_packet(short_message, 0, 10));
-    require(card->ecm_calls == 1, "short section message supplied ECM keys");
+    require(card->ecm_calls == 3, "short section message supplied ECM keys");
     auto trailing = message; trailing.push_back(0);
     feed(ctx.get(), signaling_packet(trailing, 0, 11));
-    require(card->ecm_calls == 1, "message trailing bytes accepted");
+    require(card->ecm_calls == 3, "message trailing bytes accepted");
 }
 
 void test_emm_option()
