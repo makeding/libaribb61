@@ -4,7 +4,7 @@ Streaming MMT/TLV ACAS descrambler extracted from recdvb's acas implementation.
 C++20 implementation with a small C API resembling libaribb25's stream API.
 See [API contract](docs/API.md) for ownership, errors and current limitations.
 
-Build (CMake, standalone Asio, PC/SC development files):
+Build (CMake, standalone Asio, OpenSSL libcrypto, PC/SC development files):
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -26,4 +26,5 @@ remain in the implementation, including bundled crypto code.
 
 Use `-DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF` for embedding the library.
 The default remains shared. Static consumers also link the platform PC/SC,
-thread and C++ runtime libraries (plus Winsock on Windows).
+thread and C++ runtime libraries (plus Winsock on Windows). Camellia uses
+OpenSSL libcrypto; `pkg-config --static libaribb61` includes that dependency.

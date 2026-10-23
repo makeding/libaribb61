@@ -54,7 +54,7 @@ inline std::vector<uint8_t> make_section(uint8_t table_id, const std::vector<uin
 inline std::vector<uint8_t> make_ecm_section(uint8_t generation)
 {
     std::vector<uint8_t> ecm(27, 0);
-    ecm[0] = 0x21;
+    ecm[0] = 26;
     ecm[1] = 0x12;
     ecm[2] = 0x34;
     ecm[3] = generation;

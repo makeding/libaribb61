@@ -10,6 +10,7 @@
 
 #include "aribb61/arib_std_b61.h"
 #include "card.h"
+#include "routing.h"
 #include "crypto/aes.h"
 #include "crypto/camellia.h"
 #include "stream_test_support.h"
