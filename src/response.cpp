@@ -11,7 +11,8 @@ uint16_t be16(const uint8_t *p)
 
 bool is_viewable(uint16_t return_code)
 {
-    return return_code == 0x0800 || return_code == 0x0600 || return_code == 0x4680;
+    return return_code == 0x0800 || return_code == 0x0600 || return_code == 0x4680 ||
+           return_code == 0x8700;
 }
 
 } // namespace

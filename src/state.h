@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <memory>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -20,7 +21,11 @@ public:
     void set_verbose(bool enabled) { verbose = enabled; }
     void set_proxy(const std::string& address);
     bool get_ca_system_id(uint16_t& id);
+    std::optional<uint16_t> ca_system_id() const {
+        return identity ? std::optional<uint16_t>(identity->ca_system_id) : std::nullopt;
+    }
     void retain_ecm_streams(const std::set<uint32_t>& streams);
+    void invalidate_ecm_stream(uint32_t stream) { keys.erase(stream); }
     bool on_ecm(uint32_t stream_id, const std::vector<uint8_t>& ecm, const acas_ecm_metadata& metadata);
     void on_emm_section(const uint8_t *data, size_t size);
     bool decrypt_payload(uint32_t ecm_stream_id, uint8_t scramble_flag,
@@ -38,6 +43,7 @@ private:
                         uint8_t broadcaster_id);
 
     std::unique_ptr<AcasCardClient> card;
+    std::optional<acas_card_identity> identity;
     std::vector<uint8_t> last_emm;
     struct KeyState {
         std::vector<uint8_t> last_ecm;

@@ -32,6 +32,7 @@
 
 #include "sections.h"
 #include "state.h"
+#include "routing_state.h"
 
 namespace {
 
@@ -94,9 +95,7 @@ struct MmtpInfo {
     uint8_t payload_type = 0;
     uint8_t scramble_flag = 0;
     uint8_t *scramble_control = nullptr;
-    uint8_t *extension_length_field = nullptr;
-    uint8_t *b61_multi_length_field = nullptr;
-    uint8_t *payload_length_field = nullptr;
+    bool has_scramble_method = false;
     bool has_message_authentication = false;
     bool has_initial_counter = false;
     std::array<uint8_t, 16> initial_counter{};
@@ -130,7 +129,6 @@ bool parse_mmtp(uint8_t *data, size_t size, MmtpInfo& out)
             return false;
         }
         const uint16_t extension_type = be16(data + pos);
-        out.extension_length_field = data + pos + 2;
         const uint16_t extension_length = be16(data + pos + 2);
         pos += 4;
         if (size < pos + extension_length) {
@@ -143,7 +141,6 @@ bool parse_mmtp(uint8_t *data, size_t size, MmtpInfo& out)
             while (ext_end - ext_pos >= 5) {
                 const uint16_t multi_type = be16(data + ext_pos) & 0x7fff;
                 const bool multi_end = (data[ext_pos] & 0x80) != 0;
-                uint8_t *multi_length_field = data + ext_pos + 2;
                 const uint16_t multi_length = be16(data + ext_pos + 2);
                 ext_pos += 4;
                 if (ext_end - ext_pos < multi_length) {
@@ -151,26 +148,26 @@ bool parse_mmtp(uint8_t *data, size_t size, MmtpInfo& out)
                 }
 
                 if (multi_type == 0x0001 && multi_length >= 1) {
+                    if (out.scramble_control) return false;
                     out.scramble_control = data + ext_pos;
                     out.scramble_flag = (*out.scramble_control & 0x18) >> 3;
 
-                    const bool has_scramble_system_id = (*out.scramble_control & 0x04) != 0;
+                    const bool has_scramble_method = (*out.scramble_control & 0x04) != 0;
                     const bool has_message_authentication = (*out.scramble_control & 0x02) != 0;
                     const bool has_initial_counter = (*out.scramble_control & 0x01) != 0;
                     size_t b61_pos = ext_pos + 1;
-                    if (has_scramble_system_id) {
+                    out.has_scramble_method = has_scramble_method;
+                    if (has_scramble_method) {
                         if (b61_pos >= ext_pos + multi_length) {
                             return false;
                         }
                         ++b61_pos;
                     }
+                    out.has_message_authentication = has_message_authentication;
                     if (has_message_authentication) {
                         if (ext_pos + multi_length - b61_pos < 2) {
                             return false;
                         }
-                        out.has_message_authentication = true;
-                        out.b61_multi_length_field = multi_length_field;
-                        out.payload_length_field = data + b61_pos;
                         out.decrypt_size = be16(data + b61_pos);
                         b61_pos += 2;
                     }
@@ -204,23 +201,41 @@ bool parse_mmtp(uint8_t *data, size_t size, MmtpInfo& out)
     return true;
 }
 
-void process_signaling_message(const uint8_t *data, size_t size, AcasState& acas, bool emm_enabled)
+void process_signaling_message(uint32_t stream_id, const uint8_t *data, size_t size,
+                               AcasState& acas, RoutingState& routes, bool emm_enabled)
 {
     if (size < 5) {
         return;
     }
     const uint16_t message_id = be16(data);
-    if (message_id != 0x8000 && message_id != 0x8001 &&
-        message_id != 0x8002 && message_id != 0x8003) {
+    if (message_id == 0) {
+        std::vector<MptSnapshot> snapshots;
+        if (acas_parse_pa_message(data, size, snapshots) && routes.update_mpts(stream_id, snapshots)) {
+            uint16_t ca_system;
+            if (acas.get_ca_system_id(ca_system)) acas.retain_ecm_streams(routes.ecm_streams(ca_system));
+            else acas.retain_ecm_streams({});
+        }
+        return;
+    }
+    if (message_id != 0x8000 && message_id != 0x8001) {
         return;
     }
 
-    const size_t header_size = message_id == 0x8003 ? 7 : 5;
+    constexpr size_t header_size = 5;
     if (size < header_size) return;
-    const size_t section_size = header_size == 7 ? be32(data + 3) : be16(data + 3);
-    if (section_size > size - header_size) return;
+    const size_t section_size = be16(data + 3);
+    if (section_size != size - header_size) return;
     const uint8_t *section = data + header_size;
     if (section_size == 0) {
+        return;
+    }
+
+    if (message_id == 0x8001) {
+        MhCatSnapshot snapshot;
+        if (acas_parse_mh_cat(section, section_size, snapshot)) {
+            routes.update_cat(stream_id, snapshot);
+            if (!routes.supports_scrambling()) acas.retain_ecm_streams({});
+        }
         return;
     }
 
@@ -228,10 +243,17 @@ void process_signaling_message(const uint8_t *data, size_t size, AcasState& acas
         std::vector<uint8_t> ecm;
         acas_ecm_metadata metadata;
         if (acas_parse_ecm_section(section, section_size, ecm, metadata)) {
-            acas.on_ecm(ecm, metadata);
+            uint16_t ca_system;
+            if (!acas.get_ca_system_id(ca_system)) {
+                acas.invalidate_ecm_stream(stream_id);
+            } else if (routes.ecm_streams(ca_system).contains(stream_id)) {
+                acas.on_ecm(stream_id, ecm, metadata);
+            }
         }
     } else if (section[0] == kMmtTableEmm && emm_enabled) {
-        acas.on_emm_section(section, section_size);
+        uint16_t ca_system;
+        if (acas.get_ca_system_id(ca_system) && routes.allows_emm(stream_id, ca_system))
+            acas.on_emm_section(section, section_size);
     }
 }
 
@@ -246,7 +268,7 @@ constexpr size_t kMaxFragmentStreams = 256;
 void process_signaling_payload(uint32_t stream_id, uint32_t sequence,
                                const uint8_t *payload, size_t size,
                                std::map<uint32_t, SignalingFragment>& fragments,
-                               AcasState& acas, bool emm_enabled)
+                               AcasState& acas, RoutingState& routes, bool emm_enabled)
 {
     if (size < 2) {
         return;
@@ -261,7 +283,7 @@ void process_signaling_payload(uint32_t stream_id, uint32_t sequence,
     auto handle_message = [&](const uint8_t *msg, size_t msg_size) {
         if (fragmentation == 0) {
             fragments.erase(stream_id);
-            process_signaling_message(msg, msg_size, acas, emm_enabled);
+            process_signaling_message(stream_id, msg, msg_size, acas, routes, emm_enabled);
         } else if (fragmentation == 1) {
             fragments.erase(stream_id);
             if (msg_size > kMaxSignalingMessage || fragments.size() >= kMaxFragmentStreams) return;
@@ -278,7 +300,7 @@ void process_signaling_payload(uint32_t stream_id, uint32_t sequence,
             fragment.sequence = sequence;
             fragment.data.insert(fragment.data.end(), msg, msg + msg_size);
             if (fragmentation == 3) {
-                process_signaling_message(fragment.data.data(), fragment.data.size(), acas, emm_enabled);
+                process_signaling_message(stream_id, fragment.data.data(), fragment.data.size(), acas, routes, emm_enabled);
                 fragments.erase(it);
             }
         }
@@ -304,7 +326,7 @@ void process_signaling_payload(uint32_t stream_id, uint32_t sequence,
         if (message_size - pos < length) {
             break;
         }
-        process_signaling_message(message_payload + pos, length, acas, emm_enabled);
+        process_signaling_message(stream_id, message_payload + pos, length, acas, routes, emm_enabled);
         pos += length;
     }
 }
@@ -342,6 +364,8 @@ public:
 private:
     int drain(acas_output_callback output, void *opaque, bool flush)
     {
+        warning_flags = 0;
+        const auto before = stats.undecrypted_packet_count;
         while (!buffer.empty()) {
             if (buffer[0] != kTlvSync) {
                 auto it = std::find(buffer.begin() + 1, buffer.end(), kTlvSync);
@@ -396,7 +420,7 @@ private:
             }
             buffer.clear();
         }
-        return 0;
+        return warning_flags | (stats.undecrypted_packet_count != before ? ARIB_STD_B61_WARN_UNDECRYPTED : 0);
     }
 
     void process_tlv(std::vector<uint8_t>& packet)
@@ -423,10 +447,21 @@ private:
             return;
         }
 
+        if (header_type == 0x60) {
+            if ((tlv_data[3] >> 4) != 6 || tlv_data[7] != 17) return;
+            if (routes.update_flow(context_id, tlv_data)) {
+                acas.retain_ecm_streams({});
+                fragments.clear();
+            }
+        }
+
         uint8_t *mmtp = tlv_data + pos;
         size_t mmtp_size = tlv_size - pos;
         MmtpInfo info;
         if (!parse_mmtp(mmtp, mmtp_size, info)) {
+            if (info.scramble_flag == kScrambleEven || info.scramble_flag == kScrambleOdd)
+                ++stats.undecrypted_packet_count;
+            if (info.has_message_authentication) warning_flags |= ARIB_STD_B61_WARN_UNVERIFIED;
             return;
         }
 
@@ -435,8 +470,17 @@ private:
 
         const bool encrypted = info.scramble_flag == kScrambleEven ||
                                info.scramble_flag == kScrambleOdd;
+        if (info.has_message_authentication) {
+            warning_flags |= ARIB_STD_B61_WARN_UNVERIFIED;
+            if (encrypted) ++stats.undecrypted_packet_count;
+            return;
+        }
         if (encrypted) {
-            if (!acas.decrypt_payload(info.scramble_flag, info.packet_id, info.sequence,
+            std::optional<uint32_t> ecm_stream;
+            if (const auto ca_system = acas.ca_system_id())
+                ecm_stream = routes.ecm_for((context_id << 16) | info.packet_id, *ca_system);
+            if (!routes.supports_scrambling() || info.has_scramble_method || info.payload_type != 0 || !ecm_stream ||
+                !acas.decrypt_payload(*ecm_stream, info.scramble_flag, info.packet_id, info.sequence,
                                       payload, info.payload_size, info.decrypt_size,
                                       info.has_initial_counter ? &info.initial_counter : nullptr)) {
                 ++stats.undecrypted_packet_count;
@@ -450,42 +494,15 @@ private:
 
         if (info.payload_type == kMmtpPayloadControlMessage) {
             process_signaling_payload((context_id << 16) | info.packet_id, info.sequence,
-                                      payload, info.payload_size, fragments, acas, emm_enabled);
+                                      payload, info.payload_size, fragments, acas, routes, emm_enabled);
         }
 
-        /*
-         * The encryption and message-authentication flags are independent.
-         * A broadcaster can switch a service to clear payloads while retaining
-         * the authentication field.  Strip that field for both encrypted and
-         * clear packets so downstream remuxers never consume the authentication
-         * bytes as media payload.
-         */
-        if (info.has_message_authentication && info.scramble_control &&
-            info.extension_length_field && info.b61_multi_length_field &&
-            info.payload_length_field) {
-            const size_t payload_abs = static_cast<size_t>(payload - packet.data());
-            const size_t payload_length_abs = static_cast<size_t>(info.payload_length_field - packet.data());
-            const size_t auth_size = info.payload_size - info.decrypt_size;
-            const uint16_t extension_length = be16(info.extension_length_field);
-            const uint16_t b61_multi_length = be16(info.b61_multi_length_field);
-            if (extension_length >= 2 && b61_multi_length >= 3 &&
-                payload_abs + info.payload_size <= packet.size()) {
-                put_be16(info.extension_length_field, extension_length - 2);
-                put_be16(info.b61_multi_length_field, b61_multi_length - 2);
-                *info.scramble_control &= static_cast<uint8_t>(~0x02);
 
-                if (auth_size > 0) {
-                    packet.erase(packet.begin() + payload_abs + info.decrypt_size,
-                                 packet.begin() + payload_abs + info.payload_size);
-                }
-                packet.erase(packet.begin() + payload_length_abs,
-                             packet.begin() + payload_length_abs + 2);
-                put_be16(packet.data() + 2, static_cast<uint16_t>(packet.size() - 4));
-            }
-        }
     }
 
     AcasState acas;
+    RoutingState routes;
+    int warning_flags = 0;
     std::vector<uint8_t> buffer;
     std::map<uint32_t, SignalingFragment> fragments;
     bool strip_null_packets = false;
@@ -526,9 +543,7 @@ extern "C" int arib_std_b61_put(ARIB_STD_B61 *ctx, const ARIB_STD_B61_BUFFER *bu
     return guarded(ctx, [&] {
         ctx->borrowed.clear();
         ctx->started = ctx->started || buf->size != 0;
-        auto before = ctx->impl->stats.undecrypted_packet_count;
-        ctx->impl->process(buf->data, buf->size, collect, ctx);
-        return ctx->impl->stats.undecrypted_packet_count != before ? 1 : 0;
+        return ctx->impl->process(buf->data, buf->size, collect, ctx);
     });
 }
 extern "C" int arib_std_b61_get(ARIB_STD_B61 *ctx, ARIB_STD_B61_BUFFER *buf) {
@@ -544,9 +559,7 @@ extern "C" int arib_std_b61_get(ARIB_STD_B61 *ctx, ARIB_STD_B61_BUFFER *buf) {
 extern "C" int arib_std_b61_flush(ARIB_STD_B61 *ctx) {
     return guarded(ctx, [&] {
         ctx->borrowed.clear();
-        auto before = ctx->impl->stats.undecrypted_packet_count;
-        ctx->impl->flush(collect, ctx);
-        return ctx->impl->stats.undecrypted_packet_count != before ? 1 : 0;
+        return ctx->impl->flush(collect, ctx);
     });
 }
 extern "C" int arib_std_b61_reset(ARIB_STD_B61 *ctx) {

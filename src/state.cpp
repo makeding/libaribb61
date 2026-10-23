@@ -40,9 +40,15 @@ void AcasState::set_proxy(const std::string& address)
 
 bool AcasState::get_ca_system_id(uint16_t& id)
 {
-    acas_card_identity identity;
-    if (!card->get_identity(identity)) return false;
-    id = identity.ca_system_id;
+    acas_card_identity current;
+    if (!card->get_identity(current)) return false;
+    if (identity && (identity->module_id != current.module_id ||
+                     identity->ca_system_id != current.ca_system_id)) {
+        keys.clear();
+        last_emm.clear();
+    }
+    identity = current;
+    id = current.ca_system_id;
     return true;
 }
 

@@ -15,6 +15,7 @@
 #include "sections.h"
 #include "response.h"
 #include "state.h"
+#include "stream_test_support.h"
 
 ARIB_STD_B61 *aribb61_create_with_card(std::unique_ptr<AcasCardClient> card);
 
@@ -202,7 +203,7 @@ std::vector<uint8_t> make_ecm_card_response(uint16_t return_code)
 void test_ecm_card_response_validation()
 {
     acas_ecm_card_response parsed;
-    for (uint16_t return_code : { 0x0800, 0x0600, 0x4680 }) {
+    for (uint16_t return_code : { 0x0800, 0x0600, 0x4680, 0x8700 }) {
         const std::vector<uint8_t> response = make_ecm_card_response(return_code);
         require(acas_parse_ecm_card_response(response, parsed) &&
                 parsed.return_code == return_code && parsed.broadcaster_id == 0x42 &&
@@ -311,19 +312,13 @@ void test_clear_authenticated_passthrough()
     packet.insert(packet.end(), mmtp.begin(), mmtp.end());
     put_be16(packet.data() + 2, static_cast<uint16_t>(packet.size() - 4));
 
-    std::vector<uint8_t> expected = packet;
-    expected.erase(expected.end() - 3, expected.end());
-    expected.erase(expected.begin() + 28, expected.begin() + 30);
-    put_be16(expected.data() + 21, 5);
-    put_be16(expected.data() + 25, 1);
-    expected[27] &= static_cast<uint8_t>(~0x02);
-    put_be16(expected.data() + 2, static_cast<uint16_t>(expected.size() - 4));
+    const auto expected = packet;
 
     ARIB_STD_B61 *passthrough = create_arib_std_b61();
     require(passthrough != nullptr, "passthrough creation failed");
     std::vector<uint8_t> output;
     ARIB_STD_B61_BUFFER input{packet.data(), static_cast<uint32_t>(packet.size())}, result{};
-    require(arib_std_b61_put(passthrough, &input) == 0 &&
+    require(arib_std_b61_put(passthrough, &input) == ARIB_STD_B61_WARN_UNVERIFIED &&
             arib_std_b61_flush(passthrough) == 0 &&
             arib_std_b61_get(passthrough, &result) == 0, "passthrough processing failed");
     output.assign(result.data, result.data + result.size);
@@ -362,6 +357,11 @@ void test_signaling_boundaries()
     auto *card = fake.get();
     std::unique_ptr<ARIB_STD_B61, decltype(&arib_std_b61_release)> ctx(
         aribb61_create_with_card(std::move(fake)), arib_std_b61_release);
+    const auto mpt = aribb61_test::make_mpt(1, 1,
+        aribb61_test::access_control_descriptor(0x1234, 0x42), {
+            aribb61_test::mpt_asset(1, 0x100, {})
+        });
+    feed(ctx.get(), aribb61_test::make_signaling_tlv(0, 0, 0, aribb61_test::make_pa({mpt})));
     std::vector<uint8_t> ecm(27, 0); ecm[3] = 0x12;
     auto section = make_section(0x82, ecm);
     std::vector<uint8_t> message{0x80, 0x00, 0, 0, 0};
@@ -398,13 +398,19 @@ void test_signaling_boundaries()
     feed(ctx.get(), signaling_packet(last, 3, 0));
     require(card->ecm_calls == 1, "valid sequence wrap fragments rejected");
 
-    // 0x8003 has a 32-bit length, unlike 0x8000's 16-bit length.
+    // Data transmission messages must not supply ECM keys.
     ecm[3] = 0x13; section = make_section(0x82, ecm);
     std::vector<uint8_t> long_message{0x80, 0x03, 0, 0, 0, 0, 0};
     put_be32(long_message.data() + 3, section.size());
     long_message.insert(long_message.end(), section.begin(), section.end());
     feed(ctx.get(), signaling_packet(long_message, 0, 9));
-    require(card->ecm_calls == 2, "32-bit message length rejected");
+    require(card->ecm_calls == 1, "data transmission message supplied ECM keys");
+    auto short_message = message; short_message[1] = 2;
+    feed(ctx.get(), signaling_packet(short_message, 0, 10));
+    require(card->ecm_calls == 1, "short section message supplied ECM keys");
+    auto trailing = message; trailing.push_back(0);
+    feed(ctx.get(), signaling_packet(trailing, 0, 11));
+    require(card->ecm_calls == 1, "message trailing bytes accepted");
 }
 
 void test_emm_option()
@@ -419,6 +425,9 @@ void test_emm_option()
         std::unique_ptr<ARIB_STD_B61, decltype(&arib_std_b61_release)> ctx(
             aribb61_create_with_card(std::move(fake)), arib_std_b61_release);
         if (enabled) require(arib_std_b61_set_emm_proc(ctx.get(), 1) == 0, "EMM option failed");
+        const auto cat = aribb61_test::make_cat(1, 0x1234, 0x42);
+        feed(ctx.get(), aribb61_test::make_signaling_tlv(0, 1, 0,
+            aribb61_test::make_mmt_section_message(0x8001, cat)));
         feed(ctx.get(), signaling_packet(message, 0, 0));
         require(card->emm_calls == (enabled ? 1 : 0), "EMM option was ignored");
     }
@@ -438,7 +447,7 @@ void test_invalid_auth_length_is_unchanged()
     std::unique_ptr<ARIB_STD_B61, decltype(&arib_std_b61_release)> ctx(
         create_arib_std_b61(), arib_std_b61_release);
     ARIB_STD_B61_BUFFER input{packet.data(), static_cast<uint32_t>(packet.size())}, output{};
-    require(arib_std_b61_put(ctx.get(), &input) == 0, "malformed packet feed failed");
+    require(arib_std_b61_put(ctx.get(), &input) == ARIB_STD_B61_WARN_UNVERIFIED, "malformed packet warning missing");
     require(arib_std_b61_get(ctx.get(), &output) == 0 && output.size == packet.size() &&
             std::equal(packet.begin(), packet.end(), output.data), "invalid auth length modified packet");
 }

@@ -12,7 +12,11 @@ do not retry that input without reset. Exceptions never cross the C boundary.
 Instances require external serialization. Defaults: strip off, EMM off, local card.
 Proxy and EMM/strip options can only change before feeding input or after reset.
 The decoder handles compressed-IP MMTP with AES-128-CTR. MPT access-control
-descriptors select ECM streams for each asset; MH-CAT selects EMM streams.
+descriptors select ECM streams for each service; same-CA asset descriptors with
+packet ID 0xffff exclude clear assets. MH-CAT selects EMM streams and declares
+the scrambling system for the TLV stream. Encrypted output requires a current
+MH-CAT declaring layer 1, system 1 (AES); absent or unsupported declarations
+leave encrypted packets unchanged. A new valid MH-CAT replaces the previous one.
 Keys are isolated by compressed-IP context and ECM packet ID. Only routes for
 the connected card's CA system are eligible. Missing, conflicting, unsupported
 or unresolved routes leave encrypted packets unchanged with an undecrypted
@@ -21,18 +25,27 @@ Complete valid table updates replace their previous routes; malformed updates
 do not partially change active routes. Reset also discards routing and IP flow
 information. Cross-flow IPv6 locations require a matching compressed-IP full
 header before they can be resolved.
-Unsupported explicit scrambling methods remain unchanged. Message authentication
+Routing follows the advanced-broadcast profile: MPT mode 0 with a two-byte
+service ID, package-level access-control descriptors, and asset-level clear
+exceptions. Only same-flow and IPv6/UDP location types resolve to streams.
+Other location types remain unavailable for descrambling. ECM/EMM sections
+are accepted only in M2-section messages; CA messages carry MH-CAT.
+Explicit scrambling method IDs are not supported and remain unchanged. Message authentication
 is not implemented: authenticated packets, including clear packets, remain
 byte-for-byte unchanged and report ARIB_STD_B61_WARN_UNVERIFIED. Warning values
 are bit flags and may be combined with ARIB_STD_B61_WARN_UNDECRYPTED.
 No Camellia or MAC verification is claimed. A successful ECM in one stream must
 not make another stream's packets appear descrambled, and rejection invalidates
 only the affected ECM stream's keys.
+ECM responses with successful APDU status and return code 0x0600, 0x0800,
+0x4680 or 0x8700 supply usable key material. Other return codes remain rejections.
 Statistics expose packets that remained encrypted; successful I/O is not proof
 of successful descrambling. No fake service enumeration is provided.
 
 Acceptance: C ABI consumer, arbitrary fragmentation, borrowed output lifecycle,
-small Rust reads, flush, reset, strip, EMM gating, rejection/key rotation tests.
+small Rust reads, flush, reset, strip, EMM gating, rejection/key rotation,
+independent services and contexts, route replacement, IPv6 flow resolution,
+unsupported methods, authentication preservation and observable warnings.
 Real card/proxy and broadcast sample verification remain separate acceptance.
 
 Diagnostics: verbose defaults to off; arib_std_b61_set_verbose enables ECM/EMM

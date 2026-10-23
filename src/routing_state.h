@@ -14,6 +14,7 @@ public:
     std::optional<uint32_t> ecm_for(uint32_t media, uint16_t ca_system) const;
     std::set<uint32_t> ecm_streams(uint16_t ca_system) const;
     bool allows_emm(uint32_t stream, uint16_t ca_system) const;
+    bool supports_scrambling() const;
 
 private:
     std::optional<uint32_t> resolve(uint16_t cid, const CaLocation& location) const;

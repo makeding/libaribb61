@@ -16,7 +16,8 @@ else()
 endif()
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/config.h" "/* PCSC header selection is platform based. */\n")
 add_library(aribb61 src/passthrough.cpp src/state.cpp src/card.cpp
-  src/sections.cpp src/response.cpp src/crypto/aes.cpp src/proxy/client.cpp)
+  src/sections.cpp src/response.cpp src/routing.cpp src/routing_state.cpp
+  src/crypto/aes.cpp src/proxy/client.cpp)
 target_compile_features(aribb61 PRIVATE cxx_std_20)
 target_compile_definitions(aribb61 PRIVATE ASIO_STANDALONE)
 target_include_directories(aribb61 PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -32,6 +33,13 @@ if(BUILD_TESTING)
   add_executable(api_test tests/api_test.c)
   target_link_libraries(api_test PRIVATE aribb61)
   add_test(NAME c_api COMMAND api_test)
+  foreach(test_name routing stream_routing)
+    add_executable(${test_name}_test tests/${test_name}_test.cpp)
+    target_compile_features(${test_name}_test PRIVATE cxx_std_20)
+    target_include_directories(${test_name}_test PRIVATE src)
+    target_link_libraries(${test_name}_test PRIVATE aribb61)
+    add_test(NAME ${test_name} COMMAND ${test_name}_test)
+  endforeach()
 endif()
 configure_file(libaribb61.pc.in libaribb61.pc @ONLY)
 install(TARGETS aribb61 LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}

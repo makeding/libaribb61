@@ -4,6 +4,7 @@
 bool RoutingState::update_mpts(uint32_t source, const std::vector<MptSnapshot>& snapshots)
 {
     auto next = mpts;
+    std::erase_if(next, [&](const auto& item) { return item.first.first == source; });
     for (const auto& snapshot : snapshots) next[{source, snapshot.service_id}] = snapshot;
     if (next.size() > 256) return false;
     mpts.swap(next);
@@ -12,9 +13,15 @@ bool RoutingState::update_mpts(uint32_t source, const std::vector<MptSnapshot>& 
 
 bool RoutingState::update_cat(uint32_t source, const MhCatSnapshot& snapshot)
 {
-    if (!cats.contains(source) && cats.size() >= 256) return false;
-    cats[source] = snapshot;
+    std::map<uint32_t, MhCatSnapshot> next;
+    next.emplace(source, snapshot);
+    cats.swap(next);
     return true;
+}
+
+bool RoutingState::supports_scrambling() const
+{
+    return cats.size() == 1 && cats.begin()->second.supported_scrambling;
 }
 
 bool RoutingState::update_flow(uint16_t cid, const uint8_t *header)
@@ -35,6 +42,7 @@ bool RoutingState::update_flow(uint16_t cid, const uint8_t *header)
 
 std::optional<uint32_t> RoutingState::resolve(uint16_t cid, const CaLocation& location) const
 {
+    if (location.packet_id == 0xffff) return {};
     if (location.type == 0) return (uint32_t{cid} << 16) | location.packet_id;
     if (location.type != 2) return {};
     std::optional<uint32_t> found;
