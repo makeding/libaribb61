@@ -2,6 +2,8 @@
 #define ACAS_STATE_H
 
 #include <array>
+#include <chrono>
+#include <functional>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -17,7 +19,10 @@
 
 class AcasState {
 public:
-    explicit AcasState(std::unique_ptr<AcasCardClient> card = make_acas_card_client());
+    using Clock = std::chrono::steady_clock;
+    using Now = std::function<Clock::time_point()>;
+    explicit AcasState(std::unique_ptr<AcasCardClient> card = make_acas_card_client(),
+                       Now now = [] { return Clock::now(); });
 
     void set_verbose(bool enabled) { verbose = enabled; }
     void set_proxy(const std::string& address);
@@ -45,10 +50,13 @@ private:
                         uint8_t broadcaster_id);
 
     std::unique_ptr<AcasCardClient> card;
+    Now now;
     std::optional<acas_card_identity> identity;
     std::set<std::vector<uint8_t>> processed_emms;
     struct KeyState {
         std::vector<uint8_t> last_ecm;
+        std::vector<uint8_t> failed_ecm;
+        Clock::time_point retry_after{};
         std::array<uint8_t, 16> odd_key{}, even_key{};
         bool has_key = false;
         std::string last_failure;

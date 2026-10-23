@@ -29,8 +29,8 @@ void put_be32(uint8_t *p, uint32_t value)
 
 } // namespace
 
-AcasState::AcasState(std::unique_ptr<AcasCardClient> card)
-    : card(std::move(card))
+AcasState::AcasState(std::unique_ptr<AcasCardClient> card, Now now)
+    : card(std::move(card)), now(std::move(now))
 {
 }
 
@@ -70,6 +70,10 @@ bool AcasState::on_ecm(uint32_t stream_id, const std::vector<uint8_t>& ecm,
         return true;
     }
 
+    const auto started = now();
+    if (ecm == state.failed_ecm && started < state.retry_after) return false;
+    state.failed_ecm.clear();
+
     /*
      * A new ECM supersedes the old key generation. Do not let a failed card
      * transaction fall through to decryption with the previous keys; leave
@@ -85,6 +89,11 @@ bool AcasState::on_ecm(uint32_t stream_id, const std::vector<uint8_t>& ecm,
         if (verbose || failure != last_failure) {
             if (result.response_valid) log_ecm("rejected", metadata, result.return_code, result.broadcaster_id);
             else std::cerr << "ACAS ECM unavailable: " << failure << std::endl;
+        }
+        const auto finished = now();
+        if (!result.response_valid && finished - started >= std::chrono::milliseconds(100)) {
+            state.failed_ecm = ecm;
+            state.retry_after = finished + std::chrono::milliseconds(250);
         }
         last_failure = failure;
         return false;
@@ -140,7 +149,10 @@ void AcasState::on_emm_section(const uint8_t *data, size_t size)
     }
 
     if (!updated) return;
-    for (auto& [id, state] : keys) state.last_ecm.clear();
+    for (auto& [id, state] : keys) {
+        state.last_ecm.clear();
+        state.failed_ecm.clear();
+    }
     if (verbose) std::cerr << "ACAS EMM updated work-key state: ca_system_id=0x"
               << std::hex << std::setw(4) << std::setfill('0')
               << identity.ca_system_id << std::setfill(' ') << std::dec

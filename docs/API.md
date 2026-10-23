@@ -104,3 +104,13 @@ Media remains in memory. A zero-byte response, HTTP error, failed remux, missing
 track or decode error is a failure. No recording is embedded in the test suite.
 The JSON result includes commands, timestamps, stream metadata and subprocess
 stderr; native media acceptance does not establish browser MSE playback or deployment.
+
+Slow transport failures (at least 100 ms per ECM attempt) defer identical ECM
+retries for 250 ms after completion. New ECM contents and successful EMM updates
+bypass this delay. Card rejections and fast failures remain immediately retryable;
+failed generations never retain usable old keys. The synchronous API can still
+wait for an individual card transaction; this policy bounds repeated slow attempts,
+not the duration of the underlying transport call.
+Exact duplicate signaling fragments do not append bytes or discard an active
+assembly. Conflicting fragments with the same sequence invalidate the assembly;
+sequence gaps still require a new first fragment.
