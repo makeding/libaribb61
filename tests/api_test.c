@@ -25,6 +25,21 @@ int main(void) {
         CHECK(arib_std_b61_get_statistics(ctx, &stats) == 0 && stats.total_packet_count == 1);
         CHECK(arib_std_b61_set_strip(ctx, 1) == -4);
     }
+    /* Batched packets preserve order and retain only the incomplete tail. */
+    CHECK(arib_std_b61_reset(ctx) == 0);
+    uint8_t batch[2 * sizeof(packet) + 3];
+    memcpy(batch, packet, sizeof(packet));
+    memcpy(batch + sizeof(packet), packet, sizeof(packet));
+    memcpy(batch + 2 * sizeof(packet), packet, 3);
+    in.data = batch; in.size = sizeof(batch);
+    CHECK(arib_std_b61_put(ctx, &in) == 0);
+    CHECK(arib_std_b61_get(ctx, &out) == 0);
+    CHECK(out.size == 2 * sizeof(packet) && !memcmp(out.data, batch, out.size));
+    in.data = packet + 3; in.size = sizeof(packet) - 3;
+    CHECK(arib_std_b61_put(ctx, &in) == 0);
+    CHECK(arib_std_b61_get(ctx, &out) == 0);
+    CHECK(out.size == sizeof(packet) && !memcmp(out.data, packet, out.size));
+    CHECK(arib_std_b61_get_statistics(ctx, &stats) == 0 && stats.total_packet_count == 3);
     CHECK(arib_std_b61_reset(ctx) == 0);
     CHECK(arib_std_b61_set_strip(ctx, 1) == 0);
     in.data = null_packet; in.size = sizeof(null_packet);

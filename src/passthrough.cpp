@@ -366,53 +366,59 @@ private:
     {
         warning_flags = 0;
         const auto before = stats.undecrypted_packet_count;
-        while (!buffer.empty()) {
-            if (buffer[0] != kTlvSync) {
-                auto it = std::find(buffer.begin() + 1, buffer.end(), kTlvSync);
-                size_t raw_size = it == buffer.end() ? buffer.size() : static_cast<size_t>(it - buffer.begin());
-                if (output(opaque, buffer.data(), raw_size) < 0) {
+        size_t consumed = 0;
+        while (consumed < buffer.size()) {
+            const size_t remaining = buffer.size() - consumed;
+            const auto begin = buffer.begin() + consumed;
+            const auto data = buffer.data() + consumed;
+            if (data[0] != kTlvSync) {
+                auto it = std::find(begin + 1, buffer.end(), kTlvSync);
+                size_t raw_size = it == buffer.end() ? remaining : static_cast<size_t>(it - begin);
+                if (output(opaque, data, raw_size) < 0) {
                     return -1;
                 }
-                buffer.erase(buffer.begin(), buffer.begin() + raw_size);
+                consumed += raw_size;
                 continue;
             }
 
-            if (buffer.size() < 4) {
+            if (remaining < 4) {
                 break;
             }
-            const uint8_t packet_type = buffer[1];
+            const uint8_t packet_type = data[1];
             if (!is_valid_tlv_packet_type(packet_type)) {
-                if (output(opaque, buffer.data(), 1) < 0) {
+                if (output(opaque, data, 1) < 0) {
                     return -1;
                 }
-                buffer.erase(buffer.begin());
+                ++consumed;
                 continue;
             }
 
-            const size_t packet_size = 4 + be16(buffer.data() + 2);
+            const size_t packet_size = 4 + be16(data + 2);
             if (packet_size > kMaxTlvPacketSize) {
-                if (output(opaque, buffer.data(), 1) < 0) {
+                if (output(opaque, data, 1) < 0) {
                     return -1;
                 }
-                buffer.erase(buffer.begin());
+                ++consumed;
                 continue;
             }
-            if (buffer.size() < packet_size) {
+            if (remaining < packet_size) {
                 break;
             }
             if (strip_null_packets && is_tlv_null_packet(packet_type)) {
-                buffer.erase(buffer.begin(), buffer.begin() + packet_size);
+                consumed += packet_size;
                 continue;
             }
 
-            std::vector<uint8_t> packet(buffer.begin(), buffer.begin() + packet_size);
+            std::vector<uint8_t> packet(begin, begin + packet_size);
             ++stats.total_packet_count;
             process_tlv(packet);
             if (output(opaque, packet.data(), packet.size()) < 0) {
                 return -1;
             }
-            buffer.erase(buffer.begin(), buffer.begin() + packet_size);
+            consumed += packet_size;
         }
+
+        buffer.erase(buffer.begin(), buffer.begin() + consumed);
 
         if (flush && !buffer.empty()) {
             if (output(opaque, buffer.data(), buffer.size()) < 0) {
