@@ -259,7 +259,9 @@ void process_signaling_message(uint32_t stream_id, const uint8_t *data, size_t s
 
 struct SignalingFragment {
     uint32_t sequence;
+    uint8_t fragmentation;
     std::vector<uint8_t> data;
+    std::vector<uint8_t> last_data;
 };
 // M2 sections are at most 4098 bytes; allow room for message headers and reject
 // unbounded hostile fragments. State is keyed by compressed-IP context and PID.
@@ -285,20 +287,45 @@ void process_signaling_payload(uint32_t stream_id, uint32_t sequence,
             fragments.erase(stream_id);
             process_signaling_message(stream_id, msg, msg_size, acas, routes, emm_enabled);
         } else if (fragmentation == 1) {
-            fragments.erase(stream_id);
+            auto it = fragments.find(stream_id);
+            if (it != fragments.end()) {
+                const auto& fragment = it->second;
+                if (sequence == fragment.sequence) {
+                    if (fragmentation == fragment.fragmentation &&
+                        msg_size == fragment.last_data.size() &&
+                        std::equal(msg, msg + msg_size, fragment.last_data.begin())) {
+                        return;
+                    }
+                    fragments.erase(it);
+                    return;
+                }
+                fragments.erase(it);
+            }
             if (msg_size > kMaxSignalingMessage || fragments.size() >= kMaxFragmentStreams) return;
-            fragments.emplace(stream_id, SignalingFragment{sequence, {msg, msg + msg_size}});
+            fragments.emplace(stream_id, SignalingFragment{
+                sequence, fragmentation, {msg, msg + msg_size}, {msg, msg + msg_size}});
         } else {
             auto it = fragments.find(stream_id);
             if (it == fragments.end()) return;
             auto& fragment = it->second;
+            if (sequence == fragment.sequence) {
+                if (fragmentation == fragment.fragmentation &&
+                    msg_size == fragment.last_data.size() &&
+                    std::equal(msg, msg + msg_size, fragment.last_data.begin())) {
+                    return;
+                }
+                fragments.erase(it);
+                return;
+            }
             if (sequence != fragment.sequence + uint32_t{1} ||
                 msg_size > kMaxSignalingMessage - fragment.data.size()) {
                 fragments.erase(it);
                 return;
             }
             fragment.sequence = sequence;
+            fragment.fragmentation = fragmentation;
             fragment.data.insert(fragment.data.end(), msg, msg + msg_size);
+            fragment.last_data.assign(msg, msg + msg_size);
             if (fragmentation == 3) {
                 process_signaling_message(stream_id, fragment.data.data(), fragment.data.size(), acas, routes, emm_enabled);
                 fragments.erase(it);

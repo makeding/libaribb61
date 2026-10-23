@@ -428,6 +428,59 @@ void test_signaling_boundaries()
     feed(ctx.get(), signaling_packet(last, 3, 0));
     require(card->ecm_calls == 1, "valid sequence wrap fragments rejected");
 
+    auto make_ecm_message = [](std::vector<uint8_t> ecm_payload) {
+        auto ecm_section = make_section(0x82, ecm_payload);
+        std::vector<uint8_t> ecm_message{0x80, 0x00, 0, 0, 0};
+        put_be16(ecm_message.data() + 3, ecm_section.size());
+        ecm_message.insert(ecm_message.end(), ecm_section.begin(), ecm_section.end());
+        return ecm_message;
+    };
+    auto next_ecm = ecm;
+    next_ecm[10] = 1;
+    auto next_message = make_ecm_message(next_ecm);
+    const auto third = next_message.size() / 3;
+    std::vector<uint8_t> first_third(next_message.begin(), next_message.begin() + third);
+    std::vector<uint8_t> middle_third(next_message.begin() + third, next_message.begin() + third * 2);
+    std::vector<uint8_t> last_third(next_message.begin() + third * 2, next_message.end());
+    // Exact retransmissions must preserve the partial message, including after
+    // a middle fragment has been accepted.
+    feed(ctx.get(), signaling_packet(first_third, 1, 20));
+    feed(ctx.get(), signaling_packet(first_third, 1, 20));
+    feed(ctx.get(), signaling_packet(middle_third, 2, 21));
+    feed(ctx.get(), signaling_packet(middle_third, 2, 21));
+    feed(ctx.get(), signaling_packet(last_third, 3, 22));
+    require(card->ecm_calls == 2, "duplicate fragments disrupted assembly");
+
+    auto conflicting_ecm = ecm;
+    conflicting_ecm[10] = 2;
+    auto conflicting_message = make_ecm_message(conflicting_ecm);
+    auto conflict_first = std::vector<uint8_t>(message.begin(), message.begin() + third);
+    auto conflict_middle = std::vector<uint8_t>(message.begin() + third, message.begin() + third * 2);
+    auto conflicting_middle = std::vector<uint8_t>(conflicting_message.begin() + third,
+                                                   conflicting_message.begin() + third * 2);
+    auto conflict_last = std::vector<uint8_t>(message.begin() + third * 2, message.end());
+    auto conflicting_section = make_section(0x82, conflicting_ecm);
+    require(section_crc32(conflicting_section.data(), conflicting_section.size()) == 0,
+            "conflicting test ECM CRC invalid");
+    // A same-sequence payload that differs from the stored fragment invalidates
+    // the assembly; a new first fragment can recover afterwards.
+    feed(ctx.get(), signaling_packet(conflict_first, 1, 30));
+    feed(ctx.get(), signaling_packet(conflict_middle, 2, 31));
+    feed(ctx.get(), signaling_packet(conflicting_middle, 2, 31));
+    feed(ctx.get(), signaling_packet(conflict_last, 3, 32));
+    require(card->ecm_calls == 2, "conflicting duplicate fragment was accepted");
+    auto recovery_ecm = ecm;
+    recovery_ecm[10] = 3;
+    auto recovery_message = make_ecm_message(recovery_ecm);
+    const auto recovery_half = recovery_message.size() / 2;
+    auto recovery_first = std::vector<uint8_t>(recovery_message.begin(),
+                                               recovery_message.begin() + recovery_half);
+    auto recovery_last = std::vector<uint8_t>(recovery_message.begin() + recovery_half,
+                                              recovery_message.end());
+    feed(ctx.get(), signaling_packet(recovery_first, 1, 33));
+    feed(ctx.get(), signaling_packet(recovery_last, 3, 34));
+    require(card->ecm_calls == 3, "fragment assembly did not recover after conflict");
+
     // Data transmission messages must not supply ECM keys.
     ecm[3] = 0x13; section = make_section(0x82, ecm);
     std::vector<uint8_t> long_message{0x80, 0x03, 0, 0, 0, 0, 0};
