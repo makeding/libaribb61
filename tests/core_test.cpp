@@ -75,11 +75,13 @@ std::vector<uint8_t> make_section(uint8_t table_id, const std::vector<uint8_t>& 
 }
 
 std::vector<uint8_t> make_emm_payload(const std::array<uint8_t, 6>& module_id,
-                                      std::initializer_list<uint8_t> associated_information)
+                                      std::initializer_list<uint8_t> variable_information)
 {
     std::vector<uint8_t> payload(module_id.begin(), module_id.end());
-    payload.push_back(static_cast<uint8_t>(associated_information.size()));
-    payload.insert(payload.end(), associated_information);
+    payload.push_back(static_cast<uint8_t>(2 + variable_information.size()));
+    payload.push_back(0x20);
+    payload.push_back(0x42);
+    payload.insert(payload.end(), variable_information);
     return payload;
 }
 
@@ -152,21 +154,19 @@ public:
 void test_ecm_metadata_and_emm_selection()
 {
     std::vector<uint8_t> ecm(27, 0);
-    ecm[0] = 0x21; // F1.
-    ecm[1] = 0x12;
-    ecm[2] = 0x34;
+    ecm[0] = 26;
+    ecm[1] = 0x21;
+    ecm[2] = 0x12;
     ecm[3] = 0x56;
-    ecm[4] = 3;
     const std::vector<uint8_t> section = make_section(0x82, ecm);
 
     std::vector<uint8_t> parsed;
     acas_ecm_metadata metadata;
     require(acas_parse_ecm_section(section.data(), section.size(), parsed, metadata),
             "ECM section was not parsed");
-    require(parsed == ecm && metadata.is_f1 &&
-            metadata.broadcaster_group_id == 0x1234 &&
-            metadata.work_key_id == 0x56 &&
-            metadata.scrambling_key_pair_count == 3,
+    require(parsed == ecm && metadata.associated_information_length == 26 &&
+            metadata.protocol_number == 0x21 && metadata.broadcaster_id == 0x12 &&
+            metadata.work_key_id == 0x56,
             "ECM metadata mismatch");
 
     const std::array<uint8_t, 6> other = { 6, 5, 4, 3, 2, 1 };
@@ -176,15 +176,21 @@ void test_ecm_metadata_and_emm_selection()
         make_emm_payload(wanted, { 0x20, 0x02, 0xaa });
     emm_data.insert(emm_data.end(), wanted_payload.begin(), wanted_payload.end());
     const std::vector<uint8_t> emm_section = make_section(0x84, emm_data);
-    std::vector<uint8_t> selected;
-    require(acas_select_emm_payload(emm_section.data(), emm_section.size(), wanted, selected) &&
-            selected == wanted_payload,
+    std::vector<std::vector<uint8_t>> selected;
+    require(acas_select_emm_payloads(emm_section.data(), emm_section.size(), wanted, selected) &&
+            selected == std::vector<std::vector<uint8_t>>{wanted_payload},
             "EMM payload selection mismatch");
 
     std::vector<uint8_t> corrupt = emm_section;
     corrupt.back() ^= 1;
-    require(!acas_select_emm_payload(corrupt.data(), corrupt.size(), wanted, selected),
+    require(!acas_select_emm_payloads(corrupt.data(), corrupt.size(), wanted, selected),
             "corrupt EMM section was accepted");
+
+    std::vector<uint8_t> invalid_ecm = ecm;
+    invalid_ecm[0]--;
+    const std::vector<uint8_t> invalid_ecm_section = make_section(0x82, invalid_ecm);
+    require(!acas_parse_ecm_section(invalid_ecm_section.data(), invalid_ecm_section.size(), parsed, metadata),
+            "ECM with mismatched associated-information length was accepted");
 }
 
 std::vector<uint8_t> make_ecm_card_response(uint16_t return_code)
@@ -231,7 +237,7 @@ void test_clear_to_scrambled_key_transition()
     AcasState state(std::move(card));
 
     acas_ecm_metadata metadata;
-    metadata.broadcaster_group_id = 0x1001;
+    metadata.broadcaster_id = 0x10;
     metadata.work_key_id = 1;
     std::vector<uint8_t> ecm(27, 0);
     ecm[3] = metadata.work_key_id;
@@ -247,7 +253,7 @@ void test_clear_to_scrambled_key_transition()
     };
     std::vector<uint8_t> encrypted =
         encrypt_payload(plain, fake->current_even_key, packet_id, sequence);
-    require(state.decrypt_payload(0x42, kScrambleEven, packet_id, sequence,
+    require(state.decrypt_payload(0x42, ScramblingAlgorithm::Aes128Ctr, kScrambleEven, packet_id, sequence,
                                   encrypted.data(), encrypted.size(), encrypted.size(), nullptr) &&
             encrypted == plain,
             "initial even key was not used");
@@ -259,7 +265,7 @@ void test_clear_to_scrambled_key_transition()
     require(!state.on_ecm(0x42, ecm, metadata), "failed ECM was accepted");
 
     std::vector<uint8_t> unchanged = plain;
-    require(!state.decrypt_payload(0x42, kScrambleEven, packet_id, sequence,
+    require(!state.decrypt_payload(0x42, ScramblingAlgorithm::Aes128Ctr, kScrambleEven, packet_id, sequence,
                                    unchanged.data(), unchanged.size(), unchanged.size(), nullptr) &&
             unchanged == plain,
             "old key remained active after a failed ECM");
@@ -267,7 +273,7 @@ void test_clear_to_scrambled_key_transition()
     require(state.on_ecm(0x42, ecm, metadata), "repeated ECM was not retried");
     require(fake->ecm_calls == 3, "ECM retry count mismatch");
     encrypted = encrypt_payload(plain, fake->current_even_key, packet_id, sequence);
-    require(state.decrypt_payload(0x42, kScrambleEven, packet_id, sequence,
+    require(state.decrypt_payload(0x42, ScramblingAlgorithm::Aes128Ctr, kScrambleEven, packet_id, sequence,
                                   encrypted.data(), encrypted.size(), encrypted.size(), nullptr) &&
             encrypted == plain,
             "new key was not used after clear-to-scrambled transition");
@@ -276,13 +282,35 @@ void test_clear_to_scrambled_key_transition()
             "successful ECM was not deduplicated");
 
     const std::vector<uint8_t> emm_payload =
-        make_emm_payload(fake->identity.module_id, { 0x20, 0x01, 0xaa });
-    const std::vector<uint8_t> emm_section = make_section(0x84, emm_payload);
+        make_emm_payload(fake->identity.module_id, { 0x01, 0xaa });
+    const std::vector<uint8_t> second_emm_payload =
+        make_emm_payload(fake->identity.module_id, { 0x02, 0xbb });
+    std::vector<uint8_t> emm_data = emm_payload;
+    emm_data.insert(emm_data.end(), second_emm_payload.begin(), second_emm_payload.end());
+    const std::vector<uint8_t> emm_section = make_section(0x84, emm_data);
     state.on_emm_section(emm_section.data(), emm_section.size());
-    require(fake->emm_calls == 1 && fake->last_emm == emm_payload,
-            "matching EMM was not sent to the card");
+    require(fake->emm_calls == 2 && fake->last_emm == second_emm_payload,
+            "matching EMM payloads were not all sent to the card");
+    state.on_emm_section(emm_section.data(), emm_section.size());
+    require(fake->emm_calls == 2, "matching EMM payloads were not deduplicated");
     require(state.on_ecm(0x42, ecm, metadata) && fake->ecm_calls == 4,
             "same ECM was not refreshed after EMM update");
+
+    const std::array<uint8_t, 6> other_module = { 6, 5, 4, 3, 2, 1 };
+    const std::vector<uint8_t> unrelated_emm = make_emm_payload(other_module, { 0x03 });
+    const std::vector<uint8_t> unrelated_section = make_section(0x84, unrelated_emm);
+    state.on_emm_section(unrelated_section.data(), unrelated_section.size());
+    require(fake->emm_calls == 2, "unrelated EMM was sent to the card");
+
+    const std::vector<uint8_t> unprocessed_emm =
+        make_emm_payload(fake->identity.module_id, { 0x03, 0xcc });
+    std::vector<uint8_t> malformed_data = unprocessed_emm;
+    malformed_data.insert(malformed_data.end(), fake->identity.module_id.begin(), fake->identity.module_id.end());
+    malformed_data.push_back(2);
+    malformed_data.push_back(0x20);
+    const std::vector<uint8_t> malformed_section = make_section(0x84, malformed_data);
+    state.on_emm_section(malformed_section.data(), malformed_section.size());
+    require(fake->emm_calls == 2, "malformed later EMM payload caused partial card processing");
 }
 
 int collect_output(void *opaque, const uint8_t *data, size_t size)
@@ -292,7 +320,7 @@ int collect_output(void *opaque, const uint8_t *data, size_t size)
     return 0;
 }
 
-void test_clear_authenticated_passthrough()
+void test_clear_authenticated_rejection()
 {
     std::vector<uint8_t> mmtp(12, 0);
     mmtp[0] = 0x02;
@@ -312,18 +340,20 @@ void test_clear_authenticated_passthrough()
     packet.insert(packet.end(), mmtp.begin(), mmtp.end());
     put_be16(packet.data() + 2, static_cast<uint16_t>(packet.size() - 4));
 
-    const auto expected = packet;
-
-    ARIB_STD_B61 *passthrough = create_arib_std_b61();
-    require(passthrough != nullptr, "passthrough creation failed");
+    ARIB_STD_B61 *decoder = create_arib_std_b61();
+    require(decoder != nullptr, "decoder creation failed");
     std::vector<uint8_t> output;
     ARIB_STD_B61_BUFFER input{packet.data(), static_cast<uint32_t>(packet.size())}, result{};
-    require(arib_std_b61_put(passthrough, &input) == ARIB_STD_B61_WARN_UNVERIFIED &&
-            arib_std_b61_flush(passthrough) == 0 &&
-            arib_std_b61_get(passthrough, &result) == 0, "passthrough processing failed");
-    output.assign(result.data, result.data + result.size);
-    arib_std_b61_release(passthrough);
-    require(output == expected, "clear authenticated packet mismatch");
+    require(arib_std_b61_put(decoder, &input) == ARIB_STD_B61_WARN_UNVERIFIED &&
+            arib_std_b61_flush(decoder) == 0 &&
+            arib_std_b61_get(decoder, &result) == 0, "authenticated packet processing failed");
+    if (result.size != 0) output.assign(result.data, result.data + result.size);
+    ARIB_STD_B61_STATISTICS stats{};
+    require(arib_std_b61_get_statistics(decoder, &stats) == 0 &&
+            stats.total_packet_count == 1 && stats.decrypted_packet_count == 0 &&
+            stats.undecrypted_packet_count == 0, "clear authenticated packet changed decryption statistics");
+    arib_std_b61_release(decoder);
+    require(output.empty(), "clear authenticated packet was forwarded");
 }
 
 std::vector<uint8_t> signaling_packet(const std::vector<uint8_t>& message,
@@ -362,7 +392,7 @@ void test_signaling_boundaries()
             aribb61_test::mpt_asset(1, 0x100, {})
         });
     feed(ctx.get(), aribb61_test::make_signaling_tlv(0, 0, 0, aribb61_test::make_pa({mpt})));
-    std::vector<uint8_t> ecm(27, 0); ecm[3] = 0x12;
+    std::vector<uint8_t> ecm(27, 0); ecm[0] = 26; ecm[3] = 0x12;
     auto section = make_section(0x82, ecm);
     std::vector<uint8_t> message{0x80, 0x00, 0, 0, 0};
     put_be16(message.data() + 3, section.size());
@@ -433,7 +463,7 @@ void test_emm_option()
     }
 }
 
-void test_invalid_auth_length_is_unchanged()
+void test_invalid_auth_length_is_rejected()
 {
     std::vector<uint8_t> packet(34, 0);
     packet[0] = 0x7f; packet[1] = 3; packet[6] = 0x61;
@@ -448,8 +478,13 @@ void test_invalid_auth_length_is_unchanged()
         create_arib_std_b61(), arib_std_b61_release);
     ARIB_STD_B61_BUFFER input{packet.data(), static_cast<uint32_t>(packet.size())}, output{};
     require(arib_std_b61_put(ctx.get(), &input) == ARIB_STD_B61_WARN_UNVERIFIED, "malformed packet warning missing");
-    require(arib_std_b61_get(ctx.get(), &output) == 0 && output.size == packet.size() &&
-            std::equal(packet.begin(), packet.end(), output.data), "invalid auth length modified packet");
+    require(arib_std_b61_get(ctx.get(), &output) == 0 && output.size == 0,
+            "invalid authenticated packet was forwarded");
+    ARIB_STD_B61_STATISTICS stats{};
+    require(arib_std_b61_get_statistics(ctx.get(), &stats) == 0 &&
+            stats.total_packet_count == 1 && stats.decrypted_packet_count == 0 &&
+            stats.undecrypted_packet_count == 0,
+            "invalid authenticated packet changed decryption statistics");
 }
 
 } // namespace
@@ -494,10 +529,10 @@ int main()
     test_diagnostics_and_recovery();
     test_emm_option();
     test_signaling_boundaries();
-    test_invalid_auth_length_is_unchanged();
+    test_invalid_auth_length_is_rejected();
     test_ecm_metadata_and_emm_selection();
     test_ecm_card_response_validation();
     test_clear_to_scrambled_key_transition();
-    test_clear_authenticated_passthrough();
+    test_clear_authenticated_rejection();
     return 0;
 }

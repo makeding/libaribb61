@@ -1,4 +1,5 @@
 #include "routing.h"
+#include "routing_state.h"
 
 #include <array>
 #include <cstdint>
@@ -107,6 +108,22 @@ void test_mpt_routes_and_override()
             second.locations[0].dst_port == 0x1234,
             "asset route mismatch");
 
+    const auto package_scrambling = scrambler_descriptor(1, 1);
+    const auto asset_scrambling = scrambler_descriptor(1, 2);
+    const auto authentication = std::vector<uint8_t>{ 0x80, 0x06, 2, 0x40, 0x01 };
+    const auto precedence = mpt(package_scrambling, {
+        asset({ 5 }, media_same_cid, asset_scrambling),
+        asset({ 6 }, media_same_cid, authentication),
+    });
+    require(acas_parse_mpt(precedence.data(), precedence.size(), snapshot), "algorithm MPT rejected");
+    require(snapshot.assets[0].scrambling.declared &&
+            snapshot.assets[0].scrambling.algorithm == ScramblingAlgorithm::Camellia128Ctr,
+            "asset scrambling descriptor did not override package descriptor");
+    require(snapshot.assets[1].scrambling.declared &&
+            snapshot.assets[1].scrambling.algorithm == ScramblingAlgorithm::Aes128Ctr &&
+            snapshot.assets[1].authentication_required,
+            "package scrambling or asset authentication was not inherited");
+
     const auto clear = mpt(package_descriptor, {
         asset({ 4 }, media_same_cid, access_descriptor(0x1111, { 0, 0xff, 0xff })),
     });
@@ -171,10 +188,40 @@ void test_mh_cat_and_pa()
     cat[3] = static_cast<uint8_t>(cat_length);
     MhCatSnapshot snapshot;
     require(acas_parse_mh_cat(cat.data(), cat.size(), snapshot) && snapshot.version == 0x22 &&
-            snapshot.supported_scrambling && snapshot.emm_routes.size() == 1 &&
+            snapshot.scrambling.declared &&
+            snapshot.scrambling.algorithm == ScramblingAlgorithm::Aes128Ctr && snapshot.emm_routes.size() == 1 &&
             snapshot.emm_routes[0].ca_system_id == 0x1234 &&
             snapshot.emm_routes[0].locations[0].packet_id == 0x0456,
             "MH-CAT mismatch");
+
+    auto camellia_cat = cat;
+    camellia_cat.back() = 2;
+    require(acas_parse_mh_cat(camellia_cat.data(), camellia_cat.size(), snapshot) &&
+            snapshot.scrambling.algorithm == ScramblingAlgorithm::Camellia128Ctr,
+            "Camellia CAT descriptor rejected");
+
+    auto unsupported_cat = cat;
+    unsupported_cat.back() = 3;
+    require(acas_parse_mh_cat(unsupported_cat.data(), unsupported_cat.size(), snapshot) &&
+            snapshot.scrambling.declared && !snapshot.scrambling.algorithm,
+            "unsupported CAT declaration fell back to AES");
+
+    auto ip_layer_cat = cat;
+    ip_layer_cat[ip_layer_cat.size() - 2] = 0x80;
+    require(acas_parse_mh_cat(ip_layer_cat.data(), ip_layer_cat.size(), snapshot) &&
+            !snapshot.mmtp_scrambling_allowed,
+            "IP-layer CAT descriptor allowed MMTP descrambling");
+    RoutingState state;
+    require(state.update_cat(0, snapshot), "IP-layer CAT update rejected");
+    require(!state.algorithm_for(0x00010200, ScramblingAlgorithm::Aes128Ctr),
+            "packet algorithm bypassed CAT scrambling-layer constraint");
+
+    require(acas_parse_mh_cat(unsupported_cat.data(), unsupported_cat.size(), snapshot),
+            "unsupported layer-1 CAT rejected");
+    require(state.update_cat(0, snapshot), "unsupported layer-1 CAT update rejected");
+    require(state.algorithm_for(0x00010200, ScramblingAlgorithm::Aes128Ctr) ==
+                ScramblingAlgorithm::Aes128Ctr,
+            "packet algorithm did not override an unsupported layer-1 CAT algorithm");
 
     const auto table = mpt({}, { asset({ 1 }, { 0, 0x20, 0x01 }, {}) });
     std::vector<uint8_t> pa = { 0, 0, 0 };

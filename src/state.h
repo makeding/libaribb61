@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "card.h"
+#include "routing.h"
 #include "sections.h"
 
 class AcasState {
@@ -28,7 +29,8 @@ public:
     void invalidate_ecm_stream(uint32_t stream) { keys.erase(stream); }
     bool on_ecm(uint32_t stream_id, const std::vector<uint8_t>& ecm, const acas_ecm_metadata& metadata);
     void on_emm_section(const uint8_t *data, size_t size);
-    bool decrypt_payload(uint32_t ecm_stream_id, uint8_t scramble_flag,
+    bool decrypt_payload(uint32_t ecm_stream_id, ScramblingAlgorithm algorithm,
+                         uint8_t scramble_flag,
                          uint16_t packet_id,
                          uint32_t packet_sequence_number,
                          uint8_t *payload,
@@ -44,7 +46,7 @@ private:
 
     std::unique_ptr<AcasCardClient> card;
     std::optional<acas_card_identity> identity;
-    std::vector<uint8_t> last_emm;
+    std::set<std::vector<uint8_t>> processed_emms;
     struct KeyState {
         std::vector<uint8_t> last_ecm;
         std::array<uint8_t, 16> odd_key{}, even_key{};

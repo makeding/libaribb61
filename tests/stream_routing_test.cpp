@@ -11,6 +11,7 @@
 #include "aribb61/arib_std_b61.h"
 #include "card.h"
 #include "crypto/aes.h"
+#include "crypto/camellia.h"
 #include "stream_test_support.h"
 
 ARIB_STD_B61 *aribb61_create_with_card(std::unique_ptr<AcasCardClient> card);
@@ -122,15 +123,22 @@ std::array<uint8_t, 16> even_key(uint8_t generation)
 }
 
 std::vector<uint8_t> encrypt_payload(std::vector<uint8_t> payload, uint8_t generation,
-                                     uint16_t packet_id, uint32_t sequence, size_t size)
+                                     uint16_t packet_id, uint32_t sequence, size_t size,
+                                     ScramblingAlgorithm algorithm = ScramblingAlgorithm::Aes128Ctr)
 {
     require(payload.size() >= size && size > 8, "invalid encrypted test payload");
     std::array<uint8_t, 16> iv{};
     aribb61_test::put_be16(iv.data(), packet_id);
     aribb61_test::put_be32(iv.data() + 2, sequence);
-    AES_ctx aes;
-    AES_init_ctx_iv(&aes, even_key(generation).data(), iv.data());
-    AES_CTR_xcrypt_buffer(&aes, payload.data() + 8, size - 8);
+    if (algorithm == ScramblingAlgorithm::Aes128Ctr) {
+        AES_ctx aes;
+        AES_init_ctx_iv(&aes, even_key(generation).data(), iv.data());
+        AES_CTR_xcrypt_buffer(&aes, payload.data() + 8, size - 8);
+    } else {
+        require(camellia128_ctr_xcrypt(even_key(generation).data(), iv.data(),
+                                       payload.data() + 8, size - 8),
+                "Camellia test encryption failed");
+    }
     return payload;
 }
 
@@ -157,11 +165,63 @@ std::vector<uint8_t> expected_plain(uint16_t cid, uint16_t packet_id, uint32_t s
 }
 
 std::vector<uint8_t> route_table(uint8_t version, uint16_t service, uint16_t media,
-                                 uint16_t ecm, uint16_t ca_system = kCaSystem)
+                                 uint16_t ecm, uint16_t ca_system = kCaSystem,
+                                 const std::vector<uint8_t>& package_descriptors = {})
 {
+    auto descriptors = aribb61_test::access_control_descriptor(ca_system, ecm);
+    descriptors.insert(descriptors.end(), package_descriptors.begin(), package_descriptors.end());
     return aribb61_test::make_mpt(version, service,
-        aribb61_test::access_control_descriptor(ca_system, ecm),
+        descriptors,
         { aribb61_test::mpt_asset(static_cast<uint8_t>(service), media, {}) });
+}
+
+void test_camellia_ctr_vector()
+{
+    const std::array<uint8_t, 16> key = {
+        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+        0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10,
+    };
+    std::array<uint8_t, 16> block{};
+    require(camellia128_ctr_xcrypt(key.data(), key.data(), block.data(), block.size()),
+            "Camellia CTR vector encryption failed");
+    const std::array<uint8_t, 16> expected = {
+        0x67, 0x67, 0x31, 0x38, 0x54, 0x96, 0x69, 0x73,
+        0x08, 0x57, 0x06, 0x56, 0x48, 0xea, 0xbe, 0x43,
+    };
+    require(block == expected, "Camellia CTR vector mismatch");
+}
+
+void test_algorithm_precedence()
+{
+    auto fake = std::make_unique<FakeCard>();
+    std::unique_ptr<ARIB_STD_B61, decltype(&arib_std_b61_release)> ctx(
+        aribb61_create_with_card(std::move(fake)), arib_std_b61_release);
+    require(ctx != nullptr, "C API context creation failed");
+    install_cat(ctx.get(), 1);
+    const auto camellia = aribb61_test::make_scrambler_descriptor(1, 2);
+    install_mpts(ctx.get(), 1, 0x100, 2, { route_table(1, 0x101, 0x200, 0x300, kCaSystem, camellia) });
+    send_ecm(ctx.get(), 1, 0x300, 3, 1);
+
+    const auto plain = media_payload(0x30);
+    const auto camellia_cipher = encrypt_payload(plain, 1, 0x200, 4, plain.size(),
+                                                 ScramblingAlgorithm::Camellia128Ctr);
+    const auto mpt_selected = aribb61_test::make_tlv(1, 0x200, 4, 0, camellia_cipher, 0x10);
+    require(feed(ctx.get(), mpt_selected).output == expected_plain(1, 0x200, 4, plain),
+            "MPT Camellia descriptor did not override CAT AES");
+
+    const auto aes_cipher = encrypt_payload(plain, 1, 0x200, 5, plain.size());
+    const auto packet_selected = aribb61_test::make_tlv(1, 0x200, 5, 0, aes_cipher, 0x14, 0, 0x01);
+    auto expected_packet_selected = packet_selected;
+    expected_packet_selected[27] &= static_cast<uint8_t>(~0x18);
+    std::copy(plain.begin(), plain.end(), expected_packet_selected.end() - plain.size());
+    require(feed(ctx.get(), packet_selected).output == expected_packet_selected,
+            "packet AES method did not override MPT Camellia");
+
+    const auto unsupported = aribb61_test::make_scrambler_descriptor(1, 3);
+    install_mpts(ctx.get(), 1, 0x100, 6, { route_table(2, 0x101, 0x200, 0x300, kCaSystem, unsupported) });
+    const auto rejected = feed(ctx.get(), mpt_selected);
+    require(rejected.status == ARIB_STD_B61_WARN_UNDECRYPTED && rejected.output == mpt_selected,
+            "unsupported MPT method fell back to CAT AES");
 }
 
 void test_routes_are_context_scoped_and_failures_are_isolated()
@@ -298,12 +358,33 @@ void test_method_and_authentication_boundaries()
     const auto auth = aribb61_test::make_tlv(1, 0x200, 4, 0, authenticated, 0x12, cipher.size());
     const auto auth_result = feed(ctx.get(), auth);
     require(auth_result.status == (ARIB_STD_B61_WARN_UNDECRYPTED | ARIB_STD_B61_WARN_UNVERIFIED) &&
-            auth_result.output == auth, "encrypted authenticated packet was altered or decrypted");
+            auth_result.output.empty(), "encrypted authenticated packet was not discarded");
 
     const auto clear_auth = aribb61_test::make_tlv(1, 0x200, 5, 0, authenticated, 0x02, cipher.size());
     const auto clear_result = feed(ctx.get(), clear_auth);
-    require(clear_result.status == ARIB_STD_B61_WARN_UNVERIFIED && clear_result.output == clear_auth,
-            "clear authenticated packet was altered");
+    require(clear_result.status == ARIB_STD_B61_WARN_UNVERIFIED && clear_result.output.empty(),
+            "clear authenticated packet was not discarded");
+
+    const std::vector<uint8_t> auth_descriptor = { 0x80, 0x06, 2, 0x40, 1 };
+    auto descriptors = aribb61_test::access_control_descriptor(kCaSystem, 0x300);
+    descriptors.insert(descriptors.end(), auth_descriptor.begin(), auth_descriptor.end());
+    install_mpts(ctx.get(), 1, 0x100, 6, { aribb61_test::make_mpt(2, 0x101,
+        descriptors, { aribb61_test::mpt_asset(1, 0x200, {}) }) });
+    const auto declared = normal_media(1, 0x200, 3, 1, plain);
+    const auto declared_result = feed(ctx.get(), declared);
+    require(declared_result.status == (ARIB_STD_B61_WARN_UNVERIFIED | ARIB_STD_B61_WARN_UNDECRYPTED) &&
+            declared_result.output.empty(), "MPT authentication requirement was bypassed");
+    install_mpts(ctx.get(), 1, 0x100, 7, { route_table(3, 0x101, 0x200, 0x300) });
+    require(feed(ctx.get(), declared).output == expected_plain(1, 0x200, 3, plain),
+            "removed authentication declaration still blocked media");
+    auto cat = std::vector<uint8_t>{ 0x86, 1, 0, 5 };
+    cat.insert(cat.end(), auth_descriptor.begin(), auth_descriptor.end());
+    feed(ctx.get(), aribb61_test::make_signaling_tlv(1, 1, 8,
+        aribb61_test::make_mmt_section_message(0x8001, cat)));
+    const auto clear = aribb61_test::make_tlv(1, 0x200, 9, 0, plain);
+    const auto cat_result = feed(ctx.get(), clear);
+    require(cat_result.status == ARIB_STD_B61_WARN_UNVERIFIED && cat_result.output.empty(),
+            "CAT authentication requirement was bypassed for clear media");
 }
 
 void test_new_source_snapshot_retires_other_services()
@@ -377,6 +458,8 @@ void test_type2_route_and_cid_reassignment()
 
 int main()
 {
+    test_camellia_ctr_vector();
+    test_algorithm_precedence();
     test_routes_are_context_scoped_and_failures_are_isolated();
     test_missing_wrong_and_replaced_routes();
     test_method_and_authentication_boundaries();

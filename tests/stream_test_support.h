@@ -176,7 +176,8 @@ inline std::vector<uint8_t> make_mmt_section_message(uint16_t message_id,
 inline std::vector<uint8_t> make_tlv(uint16_t cid, uint16_t packet_id, uint32_t sequence,
                                      uint8_t payload_type, const std::vector<uint8_t>& payload,
                                      uint8_t scramble_control = 0,
-                                     size_t authenticated_payload_size = 0)
+                                     size_t authenticated_payload_size = 0,
+                                     uint8_t scramble_method = 0)
 {
     std::vector<uint8_t> mmtp(12, 0);
     mmtp[0] = scramble_control == 0 ? 0 : 0x02;
@@ -185,7 +186,7 @@ inline std::vector<uint8_t> make_tlv(uint16_t cid, uint16_t packet_id, uint32_t 
     put_be32(mmtp.data() + 8, sequence);
     if (scramble_control != 0) {
         std::vector<uint8_t> related = { scramble_control };
-        if (scramble_control & 0x04) related.push_back(0);
+        if (scramble_control & 0x04) related.push_back(scramble_method);
         if (scramble_control & 0x02) {
             append_be16(related, static_cast<uint16_t>(authenticated_payload_size));
         }

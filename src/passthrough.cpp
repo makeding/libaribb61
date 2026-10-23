@@ -96,6 +96,7 @@ struct MmtpInfo {
     uint8_t scramble_flag = 0;
     uint8_t *scramble_control = nullptr;
     bool has_scramble_method = false;
+    uint8_t scramble_method = 0;
     bool has_message_authentication = false;
     bool has_initial_counter = false;
     std::array<uint8_t, 16> initial_counter{};
@@ -157,13 +158,13 @@ bool parse_mmtp(uint8_t *data, size_t size, MmtpInfo& out)
                     const bool has_initial_counter = (*out.scramble_control & 0x01) != 0;
                     size_t b61_pos = ext_pos + 1;
                     out.has_scramble_method = has_scramble_method;
+                    out.has_message_authentication = has_message_authentication;
                     if (has_scramble_method) {
                         if (b61_pos >= ext_pos + multi_length) {
                             return false;
                         }
-                        ++b61_pos;
+                        out.scramble_method = data[b61_pos++];
                     }
-                    out.has_message_authentication = has_message_authentication;
                     if (has_message_authentication) {
                         if (ext_pos + multi_length - b61_pos < 2) {
                             return false;
@@ -234,7 +235,6 @@ void process_signaling_message(uint32_t stream_id, const uint8_t *data, size_t s
         MhCatSnapshot snapshot;
         if (acas_parse_mh_cat(section, section_size, snapshot)) {
             routes.update_cat(stream_id, snapshot);
-            if (!routes.supports_scrambling()) acas.retain_ecm_streams({});
         }
         return;
     }
@@ -461,7 +461,10 @@ private:
         if (!parse_mmtp(mmtp, mmtp_size, info)) {
             if (info.scramble_flag == kScrambleEven || info.scramble_flag == kScrambleOdd)
                 ++stats.undecrypted_packet_count;
-            if (info.has_message_authentication) warning_flags |= ARIB_STD_B61_WARN_UNVERIFIED;
+            if (info.has_message_authentication) {
+                warning_flags |= ARIB_STD_B61_WARN_UNVERIFIED;
+                packet.clear();
+            }
             return;
         }
 
@@ -470,17 +473,36 @@ private:
 
         const bool encrypted = info.scramble_flag == kScrambleEven ||
                                info.scramble_flag == kScrambleOdd;
-        if (info.has_message_authentication) {
+        const uint32_t media_stream = (context_id << 16) | info.packet_id;
+        if (info.has_message_authentication ||
+            (info.payload_type != kMmtpPayloadControlMessage &&
+             routes.authentication_required(media_stream))) {
             warning_flags |= ARIB_STD_B61_WARN_UNVERIFIED;
             if (encrypted) ++stats.undecrypted_packet_count;
+            packet.clear();
             return;
         }
         if (encrypted) {
             std::optional<uint32_t> ecm_stream;
+            std::optional<ScramblingAlgorithm> packet_algorithm;
+            if (info.has_scramble_method) {
+                switch (info.scramble_method) {
+                case 0x01:
+                    packet_algorithm = ScramblingAlgorithm::Aes128Ctr;
+                    break;
+                case 0x02:
+                    packet_algorithm = ScramblingAlgorithm::Camellia128Ctr;
+                    break;
+                default:
+                    ++stats.undecrypted_packet_count;
+                    return;
+                }
+            }
+            const auto algorithm = routes.algorithm_for(media_stream, packet_algorithm);
             if (const auto ca_system = acas.ca_system_id())
-                ecm_stream = routes.ecm_for((context_id << 16) | info.packet_id, *ca_system);
-            if (!routes.supports_scrambling() || info.has_scramble_method || info.payload_type != 0 || !ecm_stream ||
-                !acas.decrypt_payload(*ecm_stream, info.scramble_flag, info.packet_id, info.sequence,
+                ecm_stream = routes.ecm_for(media_stream, *ca_system);
+            if (info.payload_type != 0 || !algorithm || !ecm_stream ||
+                !acas.decrypt_payload(*ecm_stream, *algorithm, info.scramble_flag, info.packet_id, info.sequence,
                                       payload, info.payload_size, info.decrypt_size,
                                       info.has_initial_counter ? &info.initial_counter : nullptr)) {
                 ++stats.undecrypted_packet_count;

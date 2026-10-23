@@ -19,11 +19,6 @@ bool RoutingState::update_cat(uint32_t source, const MhCatSnapshot& snapshot)
     return true;
 }
 
-bool RoutingState::supports_scrambling() const
-{
-    return cats.empty() || (cats.size() == 1 && cats.begin()->second.supported_scrambling);
-}
-
 bool RoutingState::update_flow(uint16_t cid, const uint8_t *header)
 {
     Flow flow;
@@ -79,6 +74,54 @@ std::optional<uint32_t> RoutingState::ecm_for(uint32_t media, uint16_t ca_system
         }
     }
     return selected;
+}
+
+std::optional<ScramblingAlgorithm> RoutingState::algorithm_for(
+    uint32_t media, std::optional<ScramblingAlgorithm> packet_algorithm) const
+{
+    if (!mmtp_scrambling_allowed()) return {};
+    if (packet_algorithm) return packet_algorithm;
+
+    std::optional<ScramblingAlgorithm> selected;
+    bool mpt_declared = false;
+    for (const auto& [source, table] : mpts) {
+        const uint16_t cid = source.first >> 16;
+        for (const auto& asset : table.assets) {
+            const bool matches = std::any_of(asset.locations.begin(), asset.locations.end(),
+                [&](const auto& location) { return resolve(cid, location) == media; });
+            if (!matches || !asset.scrambling.declared) continue;
+            if (!asset.scrambling.algorithm) return {};
+            if (mpt_declared && selected != asset.scrambling.algorithm) return {};
+            selected = asset.scrambling.algorithm;
+            mpt_declared = true;
+        }
+    }
+    if (mpt_declared) return selected;
+
+    if (!cats.empty()) {
+        const auto& cat = cats.begin()->second;
+        if (cat.scrambling.declared) return cat.scrambling.algorithm;
+    }
+    return ScramblingAlgorithm::Aes128Ctr;
+}
+
+bool RoutingState::mmtp_scrambling_allowed() const
+{
+    return cats.empty() || cats.begin()->second.mmtp_scrambling_allowed;
+}
+
+bool RoutingState::authentication_required(uint32_t media) const
+{
+    if (!cats.empty() && cats.begin()->second.authentication_required) return true;
+    for (const auto& [source, table] : mpts) {
+        const uint16_t cid = source.first >> 16;
+        for (const auto& asset : table.assets) {
+            const bool matches = std::any_of(asset.locations.begin(), asset.locations.end(),
+                [&](const auto& location) { return resolve(cid, location) == media; });
+            if (matches && asset.authentication_required) return true;
+        }
+    }
+    return false;
 }
 
 std::set<uint32_t> RoutingState::ecm_streams(uint16_t ca_system) const

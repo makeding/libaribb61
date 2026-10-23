@@ -4,7 +4,18 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <vector>
+
+enum class ScramblingAlgorithm : uint8_t {
+    Aes128Ctr,
+    Camellia128Ctr,
+};
+
+struct ScramblingAlgorithmSelection {
+    bool declared = false;
+    std::optional<ScramblingAlgorithm> algorithm;
+};
 
 struct CaLocation {
     uint8_t type = 0;
@@ -23,6 +34,8 @@ struct MptAssetRoute {
     std::vector<uint8_t> asset_id;
     std::vector<CaLocation> locations;
     std::vector<CaRoute> ca_routes;
+    ScramblingAlgorithmSelection scrambling;
+    bool authentication_required = false;
 };
 
 struct MptSnapshot {
@@ -34,7 +47,9 @@ struct MptSnapshot {
 struct MhCatSnapshot {
     uint8_t version = 0;
     std::vector<CaRoute> emm_routes;
-    bool supported_scrambling = false;
+    ScramblingAlgorithmSelection scrambling;
+    bool mmtp_scrambling_allowed = true;
+    bool authentication_required = false;
 };
 
 bool acas_parse_mpt(const uint8_t *data, size_t size, MptSnapshot& snapshot);

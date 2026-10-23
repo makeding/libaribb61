@@ -9,6 +9,7 @@ constexpr uint8_t kMptTableId = 0x20;
 constexpr uint8_t kMhCatTableId = 0x86;
 constexpr uint16_t kAccessControlDescriptorTag = 0x8004;
 constexpr uint16_t kScramblerDescriptorTag = 0x8005;
+constexpr uint16_t kMessageAuthenticationDescriptorTag = 0x8006;
 constexpr size_t kMaxTables = 256;
 constexpr size_t kMaxRoutes = 256;
 
@@ -124,21 +125,28 @@ bool parse_access_control_descriptor(Cursor& cursor, CaRoute& route)
 
 struct DescriptorRoutes {
     std::vector<CaRoute> routes;
-    bool has_scrambler_descriptor = false;
-    bool supported_scrambling = false;
+    ScramblingAlgorithmSelection scrambling;
     bool scrambler_conflict = false;
-    uint8_t scrambler_layer_type = 0;
-    uint8_t scramble_system_id = 0;
+    bool has_non_mmtp_scrambling = false;
+    bool authentication_required = false;
 };
+
+std::optional<ScramblingAlgorithm> scrambling_algorithm(uint8_t system_id)
+{
+    switch (system_id) {
+    case 0x01: return ScramblingAlgorithm::Aes128Ctr;
+    case 0x02: return ScramblingAlgorithm::Camellia128Ctr;
+    default: return {};
+    }
+}
 
 bool parse_mmt_descriptors(Cursor descriptors, DescriptorRoutes& result)
 {
     std::vector<CaRoute> parsed;
-    bool has_scrambler_descriptor = false;
-    bool supported_scrambling = false;
+    ScramblingAlgorithmSelection scrambling;
     bool scrambler_conflict = false;
-    uint8_t scrambler_layer_type = 0;
-    uint8_t scramble_system_id = 0;
+    bool has_non_mmtp_scrambling = false;
+    bool authentication_required = false;
     while (descriptors.remaining() != 0) {
         uint16_t tag;
         uint8_t length;
@@ -156,20 +164,24 @@ bool parse_mmt_descriptors(Cursor descriptors, DescriptorRoutes& result)
             uint8_t system_id;
             if (!body.read_u8(layer_and_reserved) || !body.read_u8(system_id)) return false;
             const uint8_t layer_type = layer_and_reserved >> 6;
-            if (has_scrambler_descriptor &&
-                (scrambler_layer_type != layer_type || scramble_system_id != system_id)) {
+            if (layer_type != 1) has_non_mmtp_scrambling = true;
+            const auto algorithm = layer_type == 1 ? scrambling_algorithm(system_id)
+                                                   : std::optional<ScramblingAlgorithm>{};
+            if (scrambling.declared && scrambling.algorithm != algorithm) {
                 scrambler_conflict = true;
             }
-            has_scrambler_descriptor = true;
-            scrambler_layer_type = layer_type;
-            scramble_system_id = system_id;
-            supported_scrambling = layer_type == 1 && system_id == 1;
+            scrambling.declared = true;
+            scrambling.algorithm = algorithm;
+        } else if (tag == kMessageAuthenticationDescriptorTag) {
+            if (length < 2) return false;
+            authentication_required = true;
         }
     }
     result.routes = std::move(parsed);
-    result.has_scrambler_descriptor = has_scrambler_descriptor;
-    result.supported_scrambling = supported_scrambling;
+    result.scrambling = scrambling;
     result.scrambler_conflict = scrambler_conflict;
+    result.has_non_mmtp_scrambling = has_non_mmtp_scrambling;
+    result.authentication_required = authentication_required;
     return true;
 }
 
@@ -202,6 +214,17 @@ bool parse_asset(Cursor& cursor, const DescriptorRoutes& package_descriptors, Mp
     asset.asset_id = std::move(asset_id);
     asset.locations = std::move(locations);
     asset.ca_routes = package_descriptors.routes;
+    asset.scrambling = package_descriptors.scrambling;
+    if (package_descriptors.scrambler_conflict) {
+        asset.scrambling.declared = true;
+        asset.scrambling.algorithm.reset();
+    }
+    if (asset_descriptors.scrambling.declared) {
+        asset.scrambling = asset_descriptors.scrambling;
+        if (asset_descriptors.scrambler_conflict) asset.scrambling.algorithm.reset();
+    }
+    asset.authentication_required = package_descriptors.authentication_required ||
+                                    asset_descriptors.authentication_required;
     for (const CaRoute& route : asset_descriptors.routes) {
         if (route.locations.size() == 1 && route.locations[0].type == 0 &&
             route.locations[0].packet_id == 0xffff) {
@@ -259,8 +282,10 @@ bool acas_parse_mh_cat(const uint8_t *data, size_t size, MhCatSnapshot& snapshot
     MhCatSnapshot parsed;
     parsed.version = data[1];
     parsed.emm_routes = std::move(routes.routes);
-    parsed.supported_scrambling = routes.has_scrambler_descriptor &&
-                                  routes.supported_scrambling && !routes.scrambler_conflict;
+    parsed.scrambling = routes.scrambling;
+    if (routes.scrambler_conflict) parsed.scrambling.algorithm.reset();
+    parsed.mmtp_scrambling_allowed = !routes.has_non_mmtp_scrambling;
+    parsed.authentication_required = routes.authentication_required;
     snapshot = std::move(parsed);
     return true;
 }

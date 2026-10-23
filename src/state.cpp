@@ -6,6 +6,7 @@
 #include <sstream>
 
 #include "crypto/aes.h"
+#include "crypto/camellia.h"
 
 namespace {
 
@@ -45,7 +46,7 @@ bool AcasState::get_ca_system_id(uint16_t& id)
     if (identity && (identity->module_id != current.module_id ||
                      identity->ca_system_id != current.ca_system_id)) {
         keys.clear();
-        last_emm.clear();
+        processed_emms.clear();
     }
     identity = current;
     id = current.ca_system_id;
@@ -110,21 +111,35 @@ void AcasState::on_emm_section(const uint8_t *data, size_t size)
     }
 
     emm_identity_failed = false;
-    std::vector<uint8_t> emm;
-    if (!acas_select_emm_payload(data, size, identity.module_id, emm) ||
-        emm == last_emm) {
+    if (this->identity && (this->identity->module_id != identity.module_id ||
+                           this->identity->ca_system_id != identity.ca_system_id)) {
+        keys.clear();
+        processed_emms.clear();
+    }
+    this->identity = identity;
+    std::vector<std::vector<uint8_t>> emms;
+    if (!acas_select_emm_payloads(data, size, identity.module_id, emms)) {
         return;
     }
 
-    uint16_t return_code = 0;
-    if (!card->process_emm(emm, return_code)) {
-        std::cerr << "ACAS EMM rejected: return=0x" << std::hex
-                  << std::setw(4) << std::setfill('0') << return_code
-                  << std::setfill(' ') << std::dec << std::endl;
-        return;
+    bool updated = false;
+    for (const auto& emm : emms) {
+        if (processed_emms.contains(emm)) continue;
+
+        uint16_t return_code = 0;
+        if (!card->process_emm(emm, return_code)) {
+            std::cerr << "ACAS EMM rejected: return=0x" << std::hex
+                      << std::setw(4) << std::setfill('0') << return_code
+                      << std::setfill(' ') << std::dec << std::endl;
+            continue;
+        }
+
+        if (processed_emms.size() >= 256) processed_emms.clear();
+        processed_emms.insert(emm);
+        updated = true;
     }
 
-    last_emm = std::move(emm);
+    if (!updated) return;
     for (auto& [id, state] : keys) state.last_ecm.clear();
     if (verbose) std::cerr << "ACAS EMM updated work-key state: ca_system_id=0x"
               << std::hex << std::setw(4) << std::setfill('0')
@@ -132,7 +147,8 @@ void AcasState::on_emm_section(const uint8_t *data, size_t size)
               << std::endl;
 }
 
-bool AcasState::decrypt_payload(uint32_t ecm_stream_id, uint8_t scramble_flag,
+bool AcasState::decrypt_payload(uint32_t ecm_stream_id, ScramblingAlgorithm algorithm,
+                                uint8_t scramble_flag,
                                 uint16_t packet_id,
                                 uint32_t packet_sequence_number,
                                 uint8_t *payload,
@@ -164,10 +180,17 @@ bool AcasState::decrypt_payload(uint32_t ecm_stream_id, uint8_t scramble_flag,
         put_be32(iv.data() + 2, packet_sequence_number);
     }
 
-    AES_ctx ctx;
-    AES_init_ctx_iv(&ctx, key->data(), iv.data());
-    AES_CTR_xcrypt_buffer(&ctx, payload + 8, decrypt_size - 8);
-    return true;
+    switch (algorithm) {
+    case ScramblingAlgorithm::Aes128Ctr: {
+        AES_ctx ctx;
+        AES_init_ctx_iv(&ctx, key->data(), iv.data());
+        AES_CTR_xcrypt_buffer(&ctx, payload + 8, decrypt_size - 8);
+        return true;
+    }
+    case ScramblingAlgorithm::Camellia128Ctr:
+        return camellia128_ctr_xcrypt(key->data(), iv.data(), payload + 8, decrypt_size - 8);
+    }
+    return false;
 }
 
 void AcasState::log_ecm(const char *state,
@@ -176,15 +199,14 @@ void AcasState::log_ecm(const char *state,
                         uint8_t broadcaster_id)
 {
     std::cerr << "ACAS ECM " << state
-              << ": format=" << (metadata.is_f1 ? "F1" : "F0")
-              << " group=0x" << std::hex << std::setw(4)
-              << std::setfill('0') << metadata.broadcaster_group_id
+              << ": associated_information_length=" << std::dec
+              << static_cast<unsigned>(metadata.associated_information_length)
+              << " protocol=0x" << std::hex << std::setw(2)
+              << std::setfill('0') << static_cast<unsigned>(metadata.protocol_number)
+              << " broadcaster=0x" << std::setw(2)
+              << static_cast<unsigned>(metadata.broadcaster_id)
               << " work_key_id=0x" << std::setw(2)
               << static_cast<unsigned>(metadata.work_key_id);
-    if (metadata.is_f1) {
-        std::cerr << " pairs=" << std::dec
-                  << static_cast<unsigned>(metadata.scrambling_key_pair_count);
-    }
     std::cerr << " return=0x" << std::hex << std::setw(4) << return_code
               << " card_broadcaster=0x" << std::setw(2)
               << static_cast<unsigned>(broadcaster_id)

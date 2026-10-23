@@ -4,6 +4,7 @@ option(BUILD_SHARED_LIBS "Build shared libraries" ON)
 include(GNUInstallDirs)
 include(CTest)
 find_package(Threads REQUIRED)
+find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 find_path(ASIO_INCLUDE_DIR asio.hpp REQUIRED)
 if(WIN32)
   set(PCSC_LIBRARY winscard ws2_32)
@@ -17,13 +18,13 @@ endif()
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/config.h" "/* PCSC header selection is platform based. */\n")
 add_library(aribb61 src/passthrough.cpp src/state.cpp src/card.cpp
   src/sections.cpp src/response.cpp src/routing.cpp src/routing_state.cpp
-  src/crypto/aes.cpp src/proxy/client.cpp)
+  src/crypto/aes.cpp src/crypto/camellia.cpp src/proxy/client.cpp)
 target_compile_features(aribb61 PRIVATE cxx_std_20)
 target_compile_definitions(aribb61 PRIVATE ASIO_STANDALONE)
 target_include_directories(aribb61 PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
   PRIVATE src "${CMAKE_CURRENT_BINARY_DIR}" "${ASIO_INCLUDE_DIR}")
-target_link_libraries(aribb61 PRIVATE ${PCSC_LIBRARY} Threads::Threads)
+target_link_libraries(aribb61 PRIVATE ${PCSC_LIBRARY} Threads::Threads OpenSSL::Crypto)
 set_target_properties(aribb61 PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION 0)
 if(BUILD_TESTING)
   add_executable(core_test tests/core_test.cpp)

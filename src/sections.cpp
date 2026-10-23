@@ -53,19 +53,27 @@ bool acas_parse_ecm_section(const uint8_t *data,
         return false;
     }
 
-    ecm.assign(data + payload_begin, data + payload_end);
-    metadata.protocol_number = ecm[0];
-    metadata.broadcaster_group_id = be16(ecm.data() + 1);
-    metadata.work_key_id = ecm[3];
-    metadata.is_f1 = (metadata.protocol_number & 0x01) != 0;
-    metadata.scrambling_key_pair_count = metadata.is_f1 && ecm.size() >= 5 ? ecm[4] : 0;
+    const size_t associated_information_length = data[payload_begin];
+    if (associated_information_length < 3 ||
+        associated_information_length != payload_end - payload_begin - 1) {
+        return false;
+    }
+
+    std::vector<uint8_t> parsed(data + payload_begin, data + payload_end);
+    acas_ecm_metadata parsed_metadata;
+    parsed_metadata.associated_information_length = static_cast<uint8_t>(associated_information_length);
+    parsed_metadata.protocol_number = parsed[1];
+    parsed_metadata.broadcaster_id = parsed[2];
+    parsed_metadata.work_key_id = parsed[3];
+    ecm = std::move(parsed);
+    metadata = parsed_metadata;
     return true;
 }
 
-bool acas_select_emm_payload(const uint8_t *data,
-                             size_t size,
-                             const std::array<uint8_t, 6>& cas_module_id,
-                             std::vector<uint8_t>& emm)
+bool acas_select_emm_payloads(const uint8_t *data,
+                              size_t size,
+                              const std::array<uint8_t, 6>& cas_module_id,
+                              std::vector<std::vector<uint8_t>>& emms)
 {
     size_t section_size = 0;
     if (!section_bounds(data, size, kEmmTable, section_size)) {
@@ -73,21 +81,25 @@ bool acas_select_emm_payload(const uint8_t *data,
     }
 
     const size_t payload_end = section_size - 4;
+    std::vector<std::vector<uint8_t>> selected;
     size_t pos = 8;
     while (pos < payload_end) {
         if (payload_end - pos < 7) {
             return false;
         }
         const size_t associated_information_size = data[pos + 6];
+        if (associated_information_size < 2) {
+            return false;
+        }
         const size_t next = pos + 7 + associated_information_size;
         if (next > payload_end) {
             return false;
         }
         if (std::equal(cas_module_id.begin(), cas_module_id.end(), data + pos)) {
-            emm.assign(data + pos, data + next);
-            return true;
+            selected.emplace_back(data + pos, data + next);
         }
         pos = next;
     }
-    return false;
+    emms = std::move(selected);
+    return true;
 }

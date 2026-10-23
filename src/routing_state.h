@@ -14,7 +14,10 @@ public:
     std::optional<uint32_t> ecm_for(uint32_t media, uint16_t ca_system) const;
     std::set<uint32_t> ecm_streams(uint16_t ca_system) const;
     bool allows_emm(uint32_t stream, uint16_t ca_system) const;
-    bool supports_scrambling() const;
+    std::optional<ScramblingAlgorithm> algorithm_for(
+        uint32_t media, std::optional<ScramblingAlgorithm> packet_algorithm) const;
+    bool mmtp_scrambling_allowed() const;
+    bool authentication_required(uint32_t media) const;
 
 private:
     std::optional<uint32_t> resolve(uint16_t cid, const CaLocation& location) const;
