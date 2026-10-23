@@ -12,6 +12,7 @@ typedef struct {
     uint64_t undecrypted_packet_count;
 } ARIB_STD_B61_STATISTICS;
 enum { ARIB_STD_B61_OK = 0, ARIB_STD_B61_WARN_UNDECRYPTED = 1,
+       ARIB_STD_B61_WARN_UNVERIFIED = 2,
        ARIB_STD_B61_ERROR_INVALID_PARAM = -1, ARIB_STD_B61_ERROR_PROCESS = -2,
        ARIB_STD_B61_ERROR_NO_MEMORY = -3, ARIB_STD_B61_ERROR_STATE = -4 };
 /* Instances must be externally serialized. No card I/O occurs until signalling.
@@ -20,7 +21,8 @@ enum { ARIB_STD_B61_OK = 0, ARIB_STD_B61_WARN_UNDECRYPTED = 1,
  * call. Empty output is not EOF. flush emits incomplete trailing bytes unchanged.
  * reset discards stream state and keys but keeps options. After processing errors,
  * reset before reuse. Options are set before the first nonempty put or after reset.
- * See docs/API.md for scope limitations (single ECM context, AES compressed IP).
+ * Warning values are combinable flags. Authenticated packets pass unchanged
+ * with WARN_UNVERIFIED. See docs/API.md for CA routing and AES scope.
  */
 ARIB_STD_B61 *create_arib_std_b61(void);
 void arib_std_b61_release(ARIB_STD_B61 *ctx);

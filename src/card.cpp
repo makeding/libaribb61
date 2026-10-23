@@ -415,11 +415,20 @@ public:
             try {
                 Transaction transaction(card);
                 sha256_t kcl;
-                if (!get_a0_auth_kcl(kcl)) {
+                int32_t status = SCARD_S_SUCCESS;
+                if (!get_a0_auth_kcl(kcl, status)) {
+                    if (status == SCARD_W_RESET_CARD) {
+                        identity_valid = false;
+                        card.reconnect();
+                        continue;
+                    }
+                    if (status != SCARD_S_SUCCESS) {
+                        // Unwind the transaction before invalidating its handle.
+                        throw std::runtime_error(error);
+                    }
                     return false;
                 }
 
-                int32_t status = SCARD_S_SUCCESS;
                 auto response = card.transmit(apdu_case4(0x90, 0x34, 0x00, 0x01, ecm, 0x00), &status);
                 if (status == SCARD_W_RESET_CARD) {
                     identity_valid = false;
@@ -491,7 +500,7 @@ public:
     }
 
 private:
-    bool get_a0_auth_kcl(sha256_t& output)
+    bool get_a0_auth_kcl(sha256_t& output, int32_t& status)
     {
         std::default_random_engine engine(std::random_device{}());
         std::uniform_int_distribution<int> distrib(0, 255);
@@ -503,10 +512,14 @@ private:
         }
         data.insert(data.end(), a0init.begin(), a0init.end());
 
-        int32_t status = SCARD_S_SUCCESS;
+        status = SCARD_S_SUCCESS;
         auto response = card.transmit(apdu_case4(0x90, 0xA0, 0x00, 0x01, data, 0x00), &status);
-        if (status != SCARD_S_SUCCESS || response.size() < 0x0e + 32 + 2 ||
-            !has_success_status(response)) {
+        if (status != SCARD_S_SUCCESS) {
+            error = "ACAS A0 SCardTransmit failed: status=" + std::to_string(static_cast<uint32_t>(status));
+            return false;
+        }
+        if (response.size() < 0x0e + 32 + 2 || !has_success_status(response)) {
+            error = "ACAS A0 response is truncated or has unsuccessful status";
             return false;
         }
 
@@ -523,6 +536,7 @@ private:
         plain_data.insert(plain_data.end(), a0init.begin(), a0init.end());
         sha256_t hash = SHA256::hash(plain_data);
         if (a0hash.size() < hash.size() || !std::equal(hash.begin(), hash.end(), a0hash.begin())) {
+            error = "ACAS A0 response authentication failed";
             return false;
         }
 

@@ -235,7 +235,7 @@ void test_clear_to_scrambled_key_transition()
     std::vector<uint8_t> ecm(27, 0);
     ecm[3] = metadata.work_key_id;
 
-    require(state.on_ecm(ecm, metadata), "initial ECM failed");
+    require(state.on_ecm(0x42, ecm, metadata), "initial ECM failed");
     require(fake->ecm_calls == 1, "initial ECM was not sent once");
 
     const uint16_t packet_id = 0x1234;
@@ -246,7 +246,7 @@ void test_clear_to_scrambled_key_transition()
     };
     std::vector<uint8_t> encrypted =
         encrypt_payload(plain, fake->current_even_key, packet_id, sequence);
-    require(state.decrypt_payload(kScrambleEven, packet_id, sequence,
+    require(state.decrypt_payload(0x42, kScrambleEven, packet_id, sequence,
                                   encrypted.data(), encrypted.size(), encrypted.size(), nullptr) &&
             encrypted == plain,
             "initial even key was not used");
@@ -255,23 +255,23 @@ void test_clear_to_scrambled_key_transition()
     metadata.work_key_id = 2;
     ecm[3] = metadata.work_key_id;
     fake->fail_next_ecm = true;
-    require(!state.on_ecm(ecm, metadata), "failed ECM was accepted");
+    require(!state.on_ecm(0x42, ecm, metadata), "failed ECM was accepted");
 
     std::vector<uint8_t> unchanged = plain;
-    require(!state.decrypt_payload(kScrambleEven, packet_id, sequence,
+    require(!state.decrypt_payload(0x42, kScrambleEven, packet_id, sequence,
                                    unchanged.data(), unchanged.size(), unchanged.size(), nullptr) &&
             unchanged == plain,
             "old key remained active after a failed ECM");
 
-    require(state.on_ecm(ecm, metadata), "repeated ECM was not retried");
+    require(state.on_ecm(0x42, ecm, metadata), "repeated ECM was not retried");
     require(fake->ecm_calls == 3, "ECM retry count mismatch");
     encrypted = encrypt_payload(plain, fake->current_even_key, packet_id, sequence);
-    require(state.decrypt_payload(kScrambleEven, packet_id, sequence,
+    require(state.decrypt_payload(0x42, kScrambleEven, packet_id, sequence,
                                   encrypted.data(), encrypted.size(), encrypted.size(), nullptr) &&
             encrypted == plain,
             "new key was not used after clear-to-scrambled transition");
 
-    require(state.on_ecm(ecm, metadata) && fake->ecm_calls == 3,
+    require(state.on_ecm(0x42, ecm, metadata) && fake->ecm_calls == 3,
             "successful ECM was not deduplicated");
 
     const std::vector<uint8_t> emm_payload =
@@ -280,7 +280,7 @@ void test_clear_to_scrambled_key_transition()
     state.on_emm_section(emm_section.data(), emm_section.size());
     require(fake->emm_calls == 1 && fake->last_emm == emm_payload,
             "matching EMM was not sent to the card");
-    require(state.on_ecm(ecm, metadata) && fake->ecm_calls == 4,
+    require(state.on_ecm(0x42, ecm, metadata) && fake->ecm_calls == 4,
             "same ECM was not refreshed after EMM update");
 }
 
@@ -454,28 +454,28 @@ void test_diagnostics_and_recovery()
     auto *previous = std::cerr.rdbuf(log.rdbuf());
     acas_ecm_metadata metadata{};
     std::vector<uint8_t> ecm(32, 0);
-    require(state.on_ecm(ecm, metadata), "diagnostics and recovery");
+    require(state.on_ecm(0x42, ecm, metadata), "diagnostics and recovery");
     require(log.str().empty(), "diagnostics and recovery");
     ecm[3] = 1;
     fake->unavailable = true;
-    require(!state.on_ecm(ecm, metadata), "diagnostics and recovery");
+    require(!state.on_ecm(0x42, ecm, metadata), "diagnostics and recovery");
     const auto first = log.str();
     require(first.find("unavailable") != std::string::npos, "diagnostics and recovery");
     require(first.find("rejected") == std::string::npos, "diagnostics and recovery");
     require(first.find("return=") == std::string::npos, "diagnostics and recovery");
-    require(!state.on_ecm(ecm, metadata), "diagnostics and recovery");
+    require(!state.on_ecm(0x42, ecm, metadata), "diagnostics and recovery");
     require(log.str() == first, "diagnostics and recovery");
     require(fake->ecm_calls == 3, "diagnostics and recovery");
     fake->unavailable = false;
-    require(state.on_ecm(ecm, metadata), "diagnostics and recovery");
+    require(state.on_ecm(0x42, ecm, metadata), "diagnostics and recovery");
     require(log.str().find("recovered") != std::string::npos, "diagnostics and recovery");
     state.set_verbose(true);
     ecm[3] = 2;
-    require(state.on_ecm(ecm, metadata), "diagnostics and recovery");
+    require(state.on_ecm(0x42, ecm, metadata), "diagnostics and recovery");
     require(log.str().find("updated") != std::string::npos, "diagnostics and recovery");
     fake->fail_next_ecm = true;
     ecm[3] = 3;
-    require(!state.on_ecm(ecm, metadata), "diagnostics and recovery");
+    require(!state.on_ecm(0x42, ecm, metadata), "diagnostics and recovery");
     require(log.str().find("rejected") != std::string::npos, "diagnostics and recovery");
     std::cerr.rdbuf(previous);
 }

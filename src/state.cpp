@@ -38,9 +38,27 @@ void AcasState::set_proxy(const std::string& address)
     card->set_proxy(address);
 }
 
-bool AcasState::on_ecm(const std::vector<uint8_t>& ecm,
+bool AcasState::get_ca_system_id(uint16_t& id)
+{
+    acas_card_identity identity;
+    if (!card->get_identity(identity)) return false;
+    id = identity.ca_system_id;
+    return true;
+}
+
+void AcasState::retain_ecm_streams(const std::set<uint32_t>& streams)
+{
+    std::erase_if(keys, [&](const auto& item) { return !streams.contains(item.first); });
+}
+
+bool AcasState::on_ecm(uint32_t stream_id, const std::vector<uint8_t>& ecm,
                        const acas_ecm_metadata& metadata)
 {
+    if (!keys.contains(stream_id) && keys.size() >= 256) return false;
+    auto& state = keys[stream_id];
+    auto& last_ecm = state.last_ecm;
+    auto& has_key = state.has_key;
+    auto& last_failure = state.last_failure;
     if (ecm == last_ecm && has_key) {
         return true;
     }
@@ -65,8 +83,8 @@ bool AcasState::on_ecm(const std::vector<uint8_t>& ecm,
         return false;
     }
 
-    odd_key = result.odd_key;
-    even_key = result.even_key;
+    state.odd_key = result.odd_key;
+    state.even_key = result.even_key;
     last_ecm = ecm;
     has_key = true;
     if (!last_failure.empty()) std::cerr << "ACAS ECM processing recovered" << std::endl;
@@ -101,14 +119,14 @@ void AcasState::on_emm_section(const uint8_t *data, size_t size)
     }
 
     last_emm = std::move(emm);
-    last_ecm.clear();
+    for (auto& [id, state] : keys) state.last_ecm.clear();
     if (verbose) std::cerr << "ACAS EMM updated work-key state: ca_system_id=0x"
               << std::hex << std::setw(4) << std::setfill('0')
               << identity.ca_system_id << std::setfill(' ') << std::dec
               << std::endl;
 }
 
-bool AcasState::decrypt_payload(uint8_t scramble_flag,
+bool AcasState::decrypt_payload(uint32_t ecm_stream_id, uint8_t scramble_flag,
                                 uint16_t packet_id,
                                 uint32_t packet_sequence_number,
                                 uint8_t *payload,
@@ -116,15 +134,17 @@ bool AcasState::decrypt_payload(uint8_t scramble_flag,
                                 size_t decrypt_size,
                                 const std::array<uint8_t, 16> *initial_counter)
 {
-    if (payload_size < decrypt_size || decrypt_size <= 8 || !has_key) {
+    const auto it = keys.find(ecm_stream_id);
+    if (payload_size < decrypt_size || decrypt_size <= 8 ||
+        it == keys.end() || !it->second.has_key) {
         return false;
     }
 
     const std::array<uint8_t, 16> *key = nullptr;
     if (scramble_flag == kScrambleEven) {
-        key = &even_key;
+        key = &it->second.even_key;
     } else if (scramble_flag == kScrambleOdd) {
-        key = &odd_key;
+        key = &it->second.odd_key;
     }
     if (!key) {
         return false;

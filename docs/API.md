@@ -11,8 +11,23 @@ negative means failure. After a negative processing result reset before reuse;
 do not retry that input without reset. Exceptions never cross the C boundary.
 Instances require external serialization. Defaults: strip off, EMM off, local card.
 Proxy and EMM/strip options can only change before feeding input or after reset.
-The initial implementation retains recdvb's compressed-IP/AES passthrough scope:
-no Camellia, MAC verification, complete CA selection or multi-service key routing.
+The decoder handles compressed-IP MMTP with AES-128-CTR. MPT access-control
+descriptors select ECM streams for each asset; MH-CAT selects EMM streams.
+Keys are isolated by compressed-IP context and ECM packet ID. Only routes for
+the connected card's CA system are eligible. Missing, conflicting, unsupported
+or unresolved routes leave encrypted packets unchanged with an undecrypted
+warning. There is no implicit association with the last received ECM.
+Complete valid table updates replace their previous routes; malformed updates
+do not partially change active routes. Reset also discards routing and IP flow
+information. Cross-flow IPv6 locations require a matching compressed-IP full
+header before they can be resolved.
+Unsupported explicit scrambling methods remain unchanged. Message authentication
+is not implemented: authenticated packets, including clear packets, remain
+byte-for-byte unchanged and report ARIB_STD_B61_WARN_UNVERIFIED. Warning values
+are bit flags and may be combined with ARIB_STD_B61_WARN_UNDECRYPTED.
+No Camellia or MAC verification is claimed. A successful ECM in one stream must
+not make another stream's packets appear descrambled, and rejection invalidates
+only the affected ECM stream's keys.
 Statistics expose packets that remained encrypted; successful I/O is not proof
 of successful descrambling. No fake service enumeration is provided.
 

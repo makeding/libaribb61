@@ -5,6 +5,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -17,9 +19,11 @@ public:
 
     void set_verbose(bool enabled) { verbose = enabled; }
     void set_proxy(const std::string& address);
-    bool on_ecm(const std::vector<uint8_t>& ecm, const acas_ecm_metadata& metadata);
+    bool get_ca_system_id(uint16_t& id);
+    void retain_ecm_streams(const std::set<uint32_t>& streams);
+    bool on_ecm(uint32_t stream_id, const std::vector<uint8_t>& ecm, const acas_ecm_metadata& metadata);
     void on_emm_section(const uint8_t *data, size_t size);
-    bool decrypt_payload(uint8_t scramble_flag,
+    bool decrypt_payload(uint32_t ecm_stream_id, uint8_t scramble_flag,
                          uint16_t packet_id,
                          uint32_t packet_sequence_number,
                          uint8_t *payload,
@@ -34,13 +38,15 @@ private:
                         uint8_t broadcaster_id);
 
     std::unique_ptr<AcasCardClient> card;
-    std::vector<uint8_t> last_ecm;
     std::vector<uint8_t> last_emm;
-    std::array<uint8_t, 16> odd_key{};
-    std::array<uint8_t, 16> even_key{};
-    bool has_key = false;
+    struct KeyState {
+        std::vector<uint8_t> last_ecm;
+        std::array<uint8_t, 16> odd_key{}, even_key{};
+        bool has_key = false;
+        std::string last_failure;
+    };
+    std::map<uint32_t, KeyState> keys;
     bool verbose = false;
-    std::string last_failure;
     bool emm_identity_failed = false;
 };
 
